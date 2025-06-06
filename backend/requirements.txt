@@ -1,0 +1,13 @@
+asgiref
+Django
+django-cors-headers
+djangorestframework
+psycopg2-binary
+sqlparse
+tzdata
+djangorestframework-simplejwt
+daphne
+channels
+channels-redis
+django-filter
+python-dotenv

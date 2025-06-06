@@ -1,0 +1,32 @@
+# Python virtualenv
+.venv/
+
+# Django cache / pyc
+__pycache__/
+*.py[cod]
+*.log
+
+# SQLite database (you’ll use Postgres in production)
+db.sqlite3
+
+# Django media uploads (keep out of Git)
+/backend/media/
+/frontend/my-app/build/
+
+# Node modules (emailserver & frontend)
+/emailserver/node_modules/
+/frontend/node_modules/
+/frontend/my-app/node_modules/
+
+# Environment files
+.env
+.env.*
+.env.production
+*.pem
+*.key
+
+# OS files
+.DS_Store
+Thumbs.db
+
+test.tsx
