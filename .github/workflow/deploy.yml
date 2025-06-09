@@ -120,3 +120,36 @@ jobs:
           # Make sure SSH client does not prompt
           SSH_AUTH_SOCK: /tmp/ssh_agent.sock
       # :contentReference[oaicite:24]{index=24}
+
+ # ──────────── 2. Build and Deploy Frontend to Firebase ────────────
+  deploy-frontend:
+    name: Build & Deploy React Frontend to Firebase
+    runs-on: ubuntu-latest
+    needs: test-backend
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      - name: Use Node.js 18
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: |
+          npm ci
+
+      - name: Run React build
+        working-directory: frontend
+        run: |
+          npm run build
+
+      - name: Deploy to Firebase Hosting
+        working-directory: frontend
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_BITITECSYSTEM. }}
+        run: |
+          npx firebase deploy --only hosting
