@@ -311,6 +311,7 @@ class Accessory(models.Model):
         ordering = ['-created_at']
 
 class ClientMachine(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     client_name = models.CharField(max_length=255)
     client_location = models.CharField(max_length=255)
     machine_name = models.CharField(max_length=255)
