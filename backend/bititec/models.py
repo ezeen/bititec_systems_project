@@ -564,14 +564,28 @@ class Delivery(models.Model):
     @property
     def client_name(self):
         if self.delivery_type == 'Sale':
-            return self.sale.client.client_name if self.sale else 'Unknown'
-        return self.lease.client.client_name if self.lease else 'Unknown'
+            # Handle Sale with null client
+            if self.sale:
+                if self.sale.client:
+                    return self.sale.client.client_name
+                elif self.sale.local_client_name:
+                    return self.sale.local_client_name
+            return 'Unknown'
+        else:  # Lease
+            if self.lease and self.lease.client:
+                return self.lease.client.client_name
+            return 'Unknown'
 
     @property
     def client_location(self):
         if self.delivery_type == 'Sale':
-            return self.sale.client.client_location if self.sale else 'Unknown'
-        return self.lease.client.client_location if self.lease else 'Unknown'
+            if self.sale and self.sale.client:
+                return self.sale.client.client_location
+            return 'Unknown'
+        else:  # Lease
+            if self.lease and self.lease.client:
+                return self.lease.client.client_location
+            return 'Unknown'
 
     @property
     def total_items(self):
