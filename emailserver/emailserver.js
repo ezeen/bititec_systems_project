@@ -18,6 +18,11 @@ const logger = createLogger({
   ]
 });
 
+if (!process.env.SENDGRID_API_KEY) {
+  console.error("FATAL: SENDGRID_API_KEY is not set");
+  process.exit(1);
+}
+
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 app.use(cors({
