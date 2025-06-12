@@ -11,3 +11,5 @@ channels
 channels-redis
 django-filter
 python-dotenv
+gunicorn
+python-dateutil
