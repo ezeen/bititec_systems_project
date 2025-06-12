@@ -241,7 +241,7 @@ class Part(models.Model):
     
     def sold_quantity(self):
         """Get the total quantity of this part that is sold"""
-        result = SaleItem.objects.filter(part=self).aggregate(total=Sum('Initial_quantity'))
+        result = SaleItem.objects.filter(part=self).aggregate(total=Sum('initial_quantity'))
         return result['total'] or 0
     
     def available_quantity(self):
