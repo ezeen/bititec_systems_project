@@ -6,7 +6,7 @@ from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, Cl
 from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, SaleSerializer, StoreInquirySerializer, UserSerializer, RegisterSerializer, StoreSerializer
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes, action
-from django.db.models import Q, Count, Max, Prefetch
+from django.db.models import Q, Count, Max, Prefetch, Sum
 from django.db import transaction
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
@@ -663,15 +663,16 @@ class SaleViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     
     def get_queryset(self):
-        client_id = self.request.query_params.get('client')
-        client_name = self.request.query_params.get('client_name')
-        sale_type = self.request.query_params.get('type')
-        
         queryset = Sale.objects.all().select_related('client').prefetch_related(
             'items__machine',
             'items__part',
             'items__accessory'
         )
+        
+        # Now apply filters
+        client_id = self.request.query_params.get('client')
+        client_name = self.request.query_params.get('client_name')
+        sale_type = self.request.query_params.get('type')
         
         if client_id:
             queryset = queryset.filter(client=client_id)
