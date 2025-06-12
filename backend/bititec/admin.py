@@ -180,7 +180,18 @@ class DeliveryAdmin(admin.ModelAdmin):
     readonly_fields = ('delivery_no', 'created_at', 'updated_at')
     
     def client_name(self, obj):
-        return obj.sale.client.client_name
+        if obj.delivery_type == 'Sale':
+            if obj.sale:
+                if obj.sale.client:
+                    return obj.sale.client.client_name
+                elif obj.sale.local_client_name:
+                    return obj.sale.local_client_name
+            return 'Unknown Sale Client'
+        else:  # Lease
+            if obj.lease and obj.lease.client:
+                return obj.lease.client.client_name
+            return 'Unknown Lease Client'
+    client_name.short_description = 'Client Name'
     
     def assigned_to_display(self, obj):
         return f"{obj.assigned_to.firstname} {obj.assigned_to.lastname}"
