@@ -469,9 +469,9 @@ class CallSerializer(serializers.ModelSerializer):
     # Flattened fields for reading
     client_name_display = serializers.CharField(source='client.client_name', read_only=True)
     client_location_display = serializers.CharField(source='client.client_location', read_only=True)
-    item_name = serializers.CharField(source='item.machine_name', read_only=True)
-    serial_no = serializers.CharField(source='item.serial_no', read_only=True)
-    store_name = serializers.CharField(source='item.store.store_name', read_only=True)
+    item_name = serializers.SerializerMethodField()
+    serial_no = serializers.SerializerMethodField()
+    store_name = serializers.SerializerMethodField()
     
     # Nested objects (these need to be proper serializers)
     client = ClientSerializer(read_only=True)
@@ -625,10 +625,39 @@ class CallSerializer(serializers.ModelSerializer):
         
         # For walk-in calls, show the stored client info
         if instance.contract_type == 'WalkIn':
-            data['client_name'] = instance.client_name
-            data['client_location'] = instance.client_location
+            data.update({
+                'client_name': instance.client_name or '',
+                'client_location': instance.client_location or '',
+                'item_name': instance.walk_in_machine_name or '',
+                'serial_no': instance.walk_in_serial_no or ''
+            })
             
         return data
+    
+    def get_client_name_display(self, obj):
+        if obj.client:
+            return obj.client.client_name
+        return obj.client_name or ""
+    
+    def get_client_location_display(self, obj):
+        if obj.client:
+            return obj.client.client_location
+        return obj.client_location or ""
+    
+    def get_item_name(self, obj):
+        if obj.item:
+            return obj.item.machine_name
+        return obj.walk_in_machine_name or ""
+
+    def get_serial_no(self, obj):
+        if obj.item:
+            return obj.item.serial_no
+        return obj.walk_in_serial_no or ""
+
+    def get_store_name(self, obj):
+        if obj.item and obj.item.store:
+            return obj.item.store.store_name
+        return ""
     
 class StoreInquirySerializer(serializers.ModelSerializer):
     requested_by = UserSerializer(read_only=True)
@@ -705,10 +734,18 @@ class SaleSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(write_only=True, required=False)
     client_location = serializers.CharField(write_only=True, required=False)
     items = SaleItemSerializer(many=True, required=True)
-    total_price = serializers.SerializerMethodField() 
-    items_count = serializers.SerializerMethodField()
+    total_price = serializers.DecimalField(
+        max_digits=12, 
+        decimal_places=2,
+        source='total_price',
+        read_only=True
+    )
+    items_count = serializers.IntegerField(
+        source='items_count',
+        read_only=True
+    )
     add_vat = serializers.BooleanField()
-    client = ClientSerializer(read_only=True)
+    client = serializers.SerializerMethodField()
     client_id = serializers.PrimaryKeyRelatedField(
         queryset=Client.objects.all(),
         write_only=True,
@@ -726,6 +763,20 @@ class SaleSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'local_client_name': {'required': False}
         }
+    
+    def get_client(self, obj):
+        if obj.client:
+            return {
+                'id': str(obj.client.id),
+                'client_name': obj.client.client_name,
+                'client_location': obj.client.client_location
+            }
+        elif obj.local_client_name:
+            return {
+                'client_name': obj.local_client_name,
+                'client_location': obj.local_client_location or ''
+            }
+        return None
     
     def validate(self, data):
         sale_type = data.get('sale_type')
