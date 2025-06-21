@@ -1,23 +1,35 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, Sale, SaleItem, Store, Call, StoreInquiry
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StoreInquiry
 from django.db.models import Sum
 from dateutil.relativedelta import relativedelta
 from django.utils import timezone
+from django.db import transaction
 
 class UserSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(read_only=True)
-    profile_image = serializers.ImageField(
+    profile_image = serializers.ImageField(read_only=True)
+    phonenumber = serializers.CharField(
         required=False, 
         allow_null=True,
-        allow_empty_file=True  
+        allow_blank=True,
+        max_length=20
     )
-    phonenumber = serializers.IntegerField(
-        required=False, 
-        allow_null=True,
-        min_value=100000000,  
-        max_value=999999999999999  
-    )
+
+    def validate_phonenumber(self, value):
+        """Validate phone number format"""
+        if not value:  # Allow empty/null values
+            return value
+            
+        # Remove spaces and other formatting
+        phone = ''.join(filter(lambda x: x.isdigit() or x == '+', str(value)))
+        
+        # Basic validation for Kenya phone numbers
+        if phone and not (phone.startswith('+254') or phone.startswith('254') or 
+                         phone.startswith('0') or phone.startswith('7') or phone.startswith('1')):
+            raise serializers.ValidationError("Invalid phone number format for Kenya")
+        
+        return value
 
     def update(self, instance, validated_data):
         # Handle profile image separately
@@ -30,25 +42,56 @@ class UserSerializer(serializers.ModelSerializer):
         
         return super().update(instance, validated_data)
     
+    def to_representation(self, instance):
+        """Customize the serialized output"""
+        data = super().to_representation(instance)
+        
+        # Ensure profile_image returns full URL
+        if instance.profile_image:
+            # Get the full URL including domain
+            request = self.context.get('request')
+            if request:
+                data['profile_image'] = request.build_absolute_uri(instance.profile_image.url)
+            else:
+                data['profile_image'] = instance.profile_image.url
+        else:
+            data['profile_image'] = None
+            
+        return data
+    
     class Meta:
         model = CustomUser
         fields = [
-            'id',
-            'email',
-            'firstname',
-            'lastname',
-            'phonenumber',
-            'role',
-            'active',
-            'profile_image'
+            'id', 'email', 'firstname', 'lastname',
+            'phonenumber', 'role', 'active', 'profile_image',
         ]
         extra_kwargs = {'password': {'write_only': True}, 'role': {'read_only': True}}
         
 class RegisterSerializer(serializers.ModelSerializer):
+    phonenumber = serializers.CharField(
+        required=False, 
+        allow_blank=True,
+        max_length=20
+    )
     class Meta:
         model = CustomUser
         fields = ['email', 'password', 'firstname', 'lastname', 'phonenumber', 'role']
         extra_kwargs = {'password': {'write_only': True}}
+
+    def validate_phonenumber(self, value):
+        """Validate phone number format for registration"""
+        if not value:  # Allow empty values during registration
+            return value
+            
+        # Remove spaces and other formatting
+        phone = ''.join(filter(lambda x: x.isdigit() or x == '+', str(value)))
+        
+        # Basic validation for Kenya phone numbers
+        if phone and not (phone.startswith('+254') or phone.startswith('254') or 
+                         phone.startswith('0') or phone.startswith('7') or phone.startswith('1')):
+            raise serializers.ValidationError("Invalid phone number format for Kenya")
+        
+        return value
 
     def create(self, validated_data):
         validated_data['active'] = validated_data['role'] in ['Director', 'Super Admin']
@@ -105,18 +148,156 @@ class StoreSerializer(serializers.ModelSerializer):
         return obj.machines.count()
     
 class AccessoryTypeSerializer(serializers.ModelSerializer):
+    image1_url = serializers.SerializerMethodField()
+    image2_url = serializers.SerializerMethodField()
+
     class Meta:
         model = AccessoryType
-        fields = ['id', 'name', 'type', 'brand', 'color']
+        fields = ['id', 'name', 'type', 'brand', 'color', 'description', 
+                 'image1', 'image2', 'image1_url', 'image2_url', 
+                 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']
+
+    def get_image1_url(self, obj):
+        if obj.image1:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.image1.url)
+            return obj.image1.url
+        return None
+
+    def get_image2_url(self, obj):
+        if obj.image2:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.image2.url)
+            return obj.image2.url
+        return None
+
+    def update(self, instance, validated_data):
+        # Handle image updates properly
+        image1 = validated_data.get('image1', None)
+        image2 = validated_data.get('image2', None)
+        
+        if image1 is not None:
+            if instance.image1:
+                instance.image1.delete()
+            instance.image1 = image1
+        
+        if image2 is not None:
+            if instance.image2:
+                instance.image2.delete()
+            instance.image2 = image2
+        
+        # Update other fields
+        for attr, value in validated_data.items():
+            if attr not in ['image1', 'image2']:
+                setattr(instance, attr, value)
+        
+        instance.save()
+        return instance
 
 class MachineTypeSerializer(serializers.ModelSerializer):
+    image1_url = serializers.SerializerMethodField()
+    image2_url = serializers.SerializerMethodField()
+
     class Meta:
         model = MachineType
-        fields = ['id', 'name', 'type', 'brand', 'color']
+        fields = ['id', 'name', 'type', 'brand', 'color', 'description', 
+                 'image1', 'image2', 'image1_url', 'image2_url', 
+                 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']
+
+    def get_image1_url(self, obj):
+        if obj.image1:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.image1.url)
+            return obj.image1.url
+        return None
+
+    def get_image2_url(self, obj):
+        if obj.image2:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.image2.url)
+            return obj.image2.url
+        return None
+
+    def update(self, instance, validated_data):
+        # Handle image updates properly
+        image1 = validated_data.get('image1', None)
+        image2 = validated_data.get('image2', None)
+        
+        if image1 is not None:
+            # Delete old image if it exists
+            if instance.image1:
+                instance.image1.delete()
+            instance.image1 = image1
+        
+        if image2 is not None:
+            # Delete old image if it exists
+            if instance.image2:
+                instance.image2.delete()
+            instance.image2 = image2
+        
+        # Update other fields
+        for attr, value in validated_data.items():
+            if attr not in ['image1', 'image2']:
+                setattr(instance, attr, value)
+        
+        instance.save()
+        return instance
 
 class PartTypeSerializer(serializers.ModelSerializer):
+    image1_url = serializers.SerializerMethodField()
+    image2_url = serializers.SerializerMethodField()
+
     class Meta:
         model = PartType
+        fields = ['id', 'name', 'type', 'brand', 'color', 'description', 
+                 'image1', 'image2', 'image1_url', 'image2_url', 
+                 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']
+
+    def get_image1_url(self, obj):
+        if obj.image1:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.image1.url)
+            return obj.image1.url
+        return None
+
+    def get_image2_url(self, obj):
+        if obj.image2:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.image2.url)
+            return obj.image2.url
+        return None
+
+    def update(self, instance, validated_data):
+        # Handle image updates properly
+        image1 = validated_data.get('image1', None)
+        image2 = validated_data.get('image2', None)
+        
+        if image1 is not None:
+            if instance.image1:
+                instance.image1.delete()
+            instance.image1 = image1
+        
+        if image2 is not None:
+            if instance.image2:
+                instance.image2.delete()
+            instance.image2 = image2
+        
+        # Update other fields
+        for attr, value in validated_data.items():
+            if attr not in ['image1', 'image2']:
+                setattr(instance, attr, value)
+        
+        instance.save()
+        return instance
         fields = ['id', 'name', 'type', 'brand', 'color']
 
 class MachineSerializer(serializers.ModelSerializer):
@@ -138,7 +319,7 @@ class MachineSerializer(serializers.ModelSerializer):
             'serial_no',
             'unit_value',
             'quantity',
-            'description',
+            'condition_description',
             'created_at',
             'machine_condition',
             'color_type',
@@ -210,13 +391,15 @@ class LeaseContractSerializer(serializers.ModelSerializer):
     client_id = serializers.PrimaryKeyRelatedField(
         source='client',
         queryset=Client.objects.all(),
-        write_only=True
+        write_only=True,
+        required=False
     )
     
     item_id = serializers.PrimaryKeyRelatedField(
         source='item',
         queryset=Machine.objects.all(),
-        write_only=True
+        write_only=True,
+        required=False
     )
     client = ClientSerializer(read_only=True)
     meter_readings = MeterReadingSerializer(many=True, read_only=True)
@@ -232,8 +415,49 @@ class LeaseContractSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {
             'created_at': {'read_only': True},
-            'lease_no': {'read_only': True}
+            'lease_no': {'read_only': True},
+            'department': {'required': False},
+            'contract_type': {'required': False},
+            'from_date': {'required': False},
+            'to_date': {'required': False},
+            'store': {'required': False},
         }
+    
+    def update(self, instance, validated_data):
+        # Track if machine is changing
+        original_machine = instance.item
+        new_machine = validated_data.get('item', instance.item)
+        
+        # Track lease active status change
+        original_active = instance.is_active
+        new_active = validated_data.get('is_active', instance.is_active)
+        
+        with transaction.atomic():
+            # Handle machine change
+            if original_machine != new_machine:
+                # Return original machine to store
+                original_machine.machine_status = 'Available'
+                original_machine.save()
+                
+                # Assign new machine
+                new_machine.machine_status = 'Leased'
+                new_machine.save()
+            
+            # Handle lease termination/reinstatement
+            if original_active != new_active:
+                if not new_active:  # Terminating lease
+                    instance.item.machine_status = 'Available'
+                else:  # Reinstating lease
+                    instance.item.machine_status = 'Leased'
+                instance.item.save()
+            
+            # Update lease fields
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+                
+            instance.save()
+            
+            return instance
 
     def get_missing_readings(self, obj):
         months_missing = []
@@ -261,7 +485,7 @@ class LeasePartInquirySerializer(serializers.ModelSerializer):
         queryset=StoreInquiry.objects.all(),
         write_only=True,
         source='store_inquiry',
-        required=True
+        required=False,
     )
     
     class Meta:
@@ -301,7 +525,7 @@ class PartSerializer(serializers.ModelSerializer):
             'unit_value',
             'intial_quantity',
             'quantity',
-            'description',
+            'condition_description',
             'created_at',
             'part_condition',
             'color_type',
@@ -402,7 +626,7 @@ class AccessorySerializer(serializers.ModelSerializer):
             'unit_value',
             'intial_quantity',
             'quantity',
-            'description',
+            'conditon_description',
             'created_at',
             'acc_condition',
             'color_type',
@@ -523,7 +747,6 @@ class CallSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'created_at': {'read_only': True},
             'ticket_no': {'read_only': True},
-            'client_verification': {'read_only': True}
         }
     
     def create(self, validated_data):
@@ -557,10 +780,28 @@ class CallSerializer(serializers.ModelSerializer):
         technicians = validated_data.pop('technician', None)
         if technicians is not None:
             instance.technician.set(technicians)
+
+        old_client_verification = instance.client_verification
+        old_technician_approval = instance.technician_manager_approval
         
         # Update other fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+
+        # Check if either approval field was updated and auto-complete if both are True
+        client_verification_changed = (
+            'client_verification' in validated_data and 
+            validated_data['client_verification'] != old_client_verification
+        )
+        technician_approval_changed = (
+            'technician_manager_approval' in validated_data and 
+            validated_data['technician_manager_approval'] != old_technician_approval
+        )
+        
+        if client_verification_changed or technician_approval_changed:
+            # Check if both approvals are now True and update status
+            if instance.client_verification and instance.technician_manager_approval:
+                instance.status = 'Complete'
         
         instance.save()
         return instance
@@ -734,16 +975,8 @@ class SaleSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(write_only=True, required=False)
     client_location = serializers.CharField(write_only=True, required=False)
     items = SaleItemSerializer(many=True, required=True)
-    total_price = serializers.DecimalField(
-        max_digits=12, 
-        decimal_places=2,
-        source='total_price',
-        read_only=True
-    )
-    items_count = serializers.IntegerField(
-        source='items_count',
-        read_only=True
-    )
+    total_price = serializers.SerializerMethodField()
+    items_count = serializers.SerializerMethodField()
     add_vat = serializers.BooleanField()
     client = serializers.SerializerMethodField()
     client_id = serializers.PrimaryKeyRelatedField(
@@ -980,3 +1213,73 @@ class LeaseAccInquirySerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['created_at', 'updated_at']
 
+class QuotationItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuotationItem
+        fields = '__all__'
+        read_only_fields = ['quotation']
+
+class QuotationSerializer(serializers.ModelSerializer):
+    items = QuotationItemSerializer(many=True)
+    created_by = UserSerializer(read_only=True)
+    client = ClientSerializer(read_only=True)
+    client_id = serializers.PrimaryKeyRelatedField(
+        queryset=Client.objects.all(),
+        write_only=True,
+        required=False,
+        allow_null=True
+    )
+    
+    class Meta:
+        model = Quotation
+        fields = [
+            'id', 'quotation_no', 'client', 'client_id', 'client_name', 'client_location',
+            'created_by', 'created_at', 'updated_at', 'valid_until', 'subtotal',
+            'vat_rate', 'vat_amount', 'total_amount', 'include_vat', 'status', 'notes', 'items'
+        ]
+        read_only_fields = ['created_by', 'created_at', 'updated_at', 'quotation_no']
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items')
+        validated_data['created_by'] = self.context['request'].user
+        client = validated_data.pop('client_id', None)
+        if client:
+            validated_data['client'] = client
+        quotation = Quotation.objects.create(**validated_data)
+        
+        for item_data in items_data:
+            QuotationItem.objects.create(quotation=quotation, **item_data)
+        
+        return quotation
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', [])
+        instance = super().update(instance, validated_data)
+        
+        # Update items
+        current_items = list(instance.items.all())
+        updated_items = []
+        
+        for item_data in items_data:
+            item_id = item_data.get('id', None)
+            if item_id:
+                # Update existing item
+                item = next((i for i in current_items if str(i.id) == item_id), None)
+                if item:
+                    for attr, value in item_data.items():
+                        setattr(item, attr, value)
+                    item.save()
+                    updated_items.append(item.id)
+                else:
+                    # ID provided but not found - create new
+                    QuotationItem.objects.create(quotation=instance, **item_data)
+            else:
+                # New item
+                QuotationItem.objects.create(quotation=instance, **item_data)
+        
+        # Delete items not in the update
+        for item in current_items:
+            if item.id not in updated_items:
+                item.delete()
+        
+        return instance

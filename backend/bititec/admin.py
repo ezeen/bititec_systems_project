@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Accessory, AccessoryType, Call, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, Machine, MachineType, MeterReading, Part, PartType, ServiceCallToken, Store, Sale, SaleItem, StoreInquiry
+from .models import Accessory, AccessoryType, Call, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, Machine, MachineType, MeterReading, Part, PartType, Quotation, QuotationItem, ServiceCallToken, Store, Sale, SaleItem, StoreInquiry
 from django.utils.html import format_html
 
 class CustomUserAdmin(UserAdmin):
@@ -72,7 +72,7 @@ class MachineAdmin(admin.ModelAdmin):
             'fields': ('machine_name', 'machine_brand', 'machine_type', 'serial_no')
         }),
         ('Inventory Details', {
-            'fields': ('unit_value', 'quantity', 'description', 'machine_condition', 'color_type')
+            'fields': ('unit_value', 'quantity', 'condition_description', 'machine_condition', 'color_type')
         }),
         ('Location & Status', {
             'fields': ('store', 'supplier_name', 'machine_status', 'is_transfer')
@@ -95,7 +95,7 @@ class PartAdmin(admin.ModelAdmin):
             'fields': ('part_name', 'part_brand', 'part_type', 'ref_no')
         }),
         ('Inventory Details', {
-            'fields': ('unit_value', 'intial_quantity', 'quantity', 'description', 'part_condition', 'color_type')
+            'fields': ('unit_value', 'intial_quantity', 'quantity', 'condition_description', 'part_condition', 'color_type')
         }),
         ('Location & Status', {
             'fields': ('store', 'supplier_name', 'part_status', 'is_transfer')
@@ -118,7 +118,7 @@ class AccessoryAdmin(admin.ModelAdmin):
             'fields': ('acc_name', 'acc_brand', 'acc_type', 'ref_no')
         }),
         ('Inventory Details', {
-            'fields': ('unit_value', 'intial_quantity', 'quantity', 'description', 'acc_condition', 'color_type')
+            'fields': ('unit_value', 'intial_quantity', 'quantity', 'condition_description', 'acc_condition', 'color_type')
         }),
         ('Location & Status', {
             'fields': ('store', 'supplier_name', 'acc_status', 'is_transfer')
@@ -271,3 +271,48 @@ class MeterReadingAdmin(admin.ModelAdmin):
     search_fields = ('lease__lease_no', 'machine__machine_name')
     raw_id_fields = ('lease', 'machine')
     readonly_fields = ('created_at', 'updated_at')
+
+class QuotationItemInline(admin.TabularInline):
+    model = QuotationItem
+    extra = 1
+    fields = ('item_type', 'item_name', 'item_brand', 'quantity', 'unit_price', 'total_price')
+    readonly_fields = ('total_price',)
+
+@admin.register(Quotation)
+class QuotationAdmin(admin.ModelAdmin):
+    list_display = ('quotation_no', 'client_display', 'status', 'total_amount', 'valid_until', 'created_at')
+    list_filter = ('status', 'created_at', 'valid_until')
+    search_fields = ('quotation_no', 'client__client_name', 'client_name')
+    inlines = [QuotationItemInline]
+    readonly_fields = ('subtotal', 'vat_amount', 'total_amount', 'created_at', 'updated_at')
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('quotation_no', 'client', 'client_name', 'client_location', 'created_by', 'status')
+        }),
+        ('Dates', {
+            'fields': ('created_at', 'updated_at', 'valid_until')
+        }),
+        ('Financial Details', {
+            'fields': ('include_vat', 'vat_rate', 'subtotal', 'vat_amount', 'total_amount')
+        }),
+        ('Additional Information', {
+            'fields': ('notes',),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def client_display(self, obj):
+        return obj.client.client_name if obj.client else obj.client_name
+    client_display.short_description = 'Client'
+    
+    def save_model(self, request, obj, form, change):
+        if not obj.pk:
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
+
+@admin.register(QuotationItem)
+class QuotationItemAdmin(admin.ModelAdmin):
+    list_display = ('item_name', 'item_type', 'item_brand', 'quantity', 'unit_price', 'total_price', 'quotation')
+    list_filter = ('item_type',)
+    search_fields = ('item_name', 'quotation__quotation_no')
+    readonly_fields = ('total_price',)

@@ -196,14 +196,12 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
-    'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.IsAuthenticated',
-    ),
+
 }
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(
-        minutes=int(os.getenv('JWT_ACCESS_TOKEN_LIFETIME', '60'))
+        minutes=int(os.getenv('JWT_ACCESS_TOKEN_LIFETIME', '360'))
     ),
     'REFRESH_TOKEN_LIFETIME': timedelta(
         minutes=int(os.getenv('JWT_REFRESH_TOKEN_LIFETIME', '1440'))

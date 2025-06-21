@@ -24,9 +24,10 @@ app.use(cors({
   origin: [
     'http://localhost:3000',
     'http://192.168.1.49:8081', // Your Expo Go URL
-    'exp://192.168.1.49:8081'  // Alternative Expo URL format
+    'exp://192.168.1.49:8081',
+    'https://bititecsystem.web.app'  
   ],
-  methods: ['POST'],
+  methods: ['GET','POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type']
 }));
 
@@ -155,6 +156,148 @@ app.post('/send-service-call', async (req, res) => {
     
     if (error.response) {
       logger.error(error.message, { error });
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.response?.body?.errors || null
+    });
+  }
+});
+
+// New endpoint for sending sales quotations
+app.post('/send-quotation', async (req, res) => {
+  try {
+    const { email, quotationData } = req.body;
+    
+    if (!email || !quotationData) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email and quotation data are required'
+      });
+    }
+    
+    const {
+      quotation_no,
+      client_name,
+      client_location,
+      total_amount,
+      valid_until,
+      items = []
+    } = quotationData;
+    
+    const subject = `Sales Quotation - ${quotation_no || 'New Quotation'}`;
+    
+    // Format items for email display
+    const itemsList = items.map(item => {
+      const unitPrice = item.unit_price ? Number(item.unit_price) : 0;
+      const totalPrice = item.total_price ? Number(item.total_price) : 0;
+      
+      return `<tr>
+        <td style="padding: 8px; border: 1px solid #ddd;">${item.item_name}</td>
+        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">${item.quantity}</td>
+        <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">KES ${unitPrice.toFixed(2)}</td>
+        <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">KES ${totalPrice.toFixed(2)}</td>
+      </tr>`;
+    }).join('');
+    
+    const htmlBody = `
+      <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 700px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 5px;">
+        <div style="text-align: center; margin-bottom: 30px;">
+          <h1 style="color: #1976d2; margin: 0;">BITITEC SYSTEMS</h1>
+          <p style="color: #666; margin: 5px 0;">Your Technology Partner</p>
+        </div>
+        
+        <h2 style="color: #333; border-bottom: 2px solid #1976d2; padding-bottom: 10px;">Sales Quotation</h2>
+        
+        <p>Dear ${client_name},</p>
+        
+        <p>Kindly find the attached as requested and confirm receipt.</p>
+        
+        <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+          <p><strong>Quotation Number:</strong> ${quotation_no || 'Pending'}</p>
+          <p><strong>Client:</strong> ${client_name}, ${client_location}</p>
+          <p><strong>Valid Until:</strong> ${valid_until ? new Date(valid_until).toLocaleDateString() : 'N/A'}</p>
+          <p><strong>Total Amount:</strong> KES ${total_amount?.toFixed(2) || '0.00'}</p>
+        </div>
+        
+        ${items.length > 0 ? `
+        <h3 style="color: #333; margin-top: 25px;">Quotation Summary</h3>
+        <table style="width: 100%; border-collapse: collapse; margin: 15px 0;">
+          <thead>
+            <tr style="background-color: #1976d2; color: white;">
+              <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Item</th>
+              <th style="padding: 10px; border: 1px solid #ddd; text-align: center;">Qty</th>
+              <th style="padding: 10px; border: 1px solid #ddd; text-align: right;">Unit Price</th>
+              <th style="padding: 10px; border: 1px solid #ddd; text-align: right;">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${itemsList}
+          </tbody>
+        </table>
+        ` : ''}
+        
+        <div style="text-align: center; margin: 30px 0;">
+          <p style="color: #666;">For any questions or clarifications, please don't hesitate to contact us.</p>
+        </div>
+        
+        <div style="border-top: 1px solid #e0e0e0; padding-top: 20px; margin-top: 30px;">
+          <p style="margin: 5px 0;">Good day.</p>
+          <p style="margin: 5px 0;">Regards,</p>
+          <p style="margin: 5px 0; font-weight: bold; color: #1976d2;">Faith Mutuku</p>
+          <p style="margin: 5px 0; font-weight: bold; color: #1976d2;">Sales Executive</p>
+          <p style="margin: 5px 0;">Tel: (+254)717-063-633</p>
+          <p style="margin: 5px 0;">Email: sales@bititecsystems.com</p>
+        </div>
+      </div>
+    `;
+    
+    const textBody = `
+      BITITEC SYSTEMS - Sales Quotation
+      
+      Dear ${client_name},
+      
+      Kindly find the attached as requested and confirm receipt.
+      
+      Quotation Details:
+      - Quotation Number: ${quotation_no || 'Pending'}
+      - Client: ${client_name}, ${client_location}
+      - Valid Until: ${valid_until ? new Date(valid_until).toLocaleDateString() : 'N/A'}
+      - Total Amount: KES ${total_amount?.toFixed(2) || '0.00'}
+      
+      ${items.length > 0 ? `
+      Items:
+      ${items.map(item => `- ${item.item_name} (Qty: ${item.quantity}) - KES ${item.total_price?.toFixed(2) || '0.00'}`).join('\n')}
+      ` : ''}
+      
+      For any questions or clarifications, please don't hesitate to contact us.
+      
+      Good day.
+      
+      Regards,
+      Faith Mutuku
+      Sales Executive
+      Tel: (+254)717-063-633
+      Email: sales@bititecsystems.com
+    `;
+    
+    const msg = {
+      to: email,
+      from: 'sales@bititecsystems.com',
+      subject: subject,
+      text: textBody,
+      html: htmlBody,
+    };
+    
+    await sgMail.send(msg);
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('Quotation email send error:', error);
+    
+    if (error.response) {
+      logger.error('SendGrid error response:', error.response.body);
     }
     
     res.status(500).json({

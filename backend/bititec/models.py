@@ -48,18 +48,43 @@ class CustomUser(AbstractUser):
     email = models.EmailField(_('email address'), unique=True)
     firstname = models.CharField(_('first name'), max_length=100)
     lastname = models.CharField(_('last name'), max_length=100)
-    phonenumber = models.PositiveIntegerField(_('phone number'))
+    phonenumber = models.CharField(_('phone number'), max_length=20, null=True, blank=True)
     role = models.CharField(_('role'), max_length=20, choices=ROLE_CHOICES, default='Technician')
     active = models.BooleanField(_('active'), default=False)
     profile_image = models.ImageField(upload_to='profile_images/', null=True, blank=True)
     
     USERNAME_FIELD = 'email'
-    REQUIRED_FIELDS = ['firstname', 'lastname', 'phonenumber', 'role']
+    REQUIRED_FIELDS = ['firstname', 'lastname', 'role']
     
     objects = CustomUserManager()
     
     def __str__(self):
         return self.email
+    
+    def save(self, *args, **kwargs):
+        # Format phone number to Kenya format if provided
+        if self.phonenumber:
+            # Remove any spaces, dashes, or other non-digit characters except +
+            phone = ''.join(filter(lambda x: x.isdigit() or x == '+', str(self.phonenumber)))
+            
+            # Handle different input formats
+            if phone.startswith('0'):
+                # Convert 0712345678 to +254712345678
+                phone = '+254' + phone[1:]
+            elif phone.startswith('254'):
+                # Convert 254712345678 to +254712345678
+                phone = '+' + phone
+            elif phone.startswith('7') or phone.startswith('1'):
+                # Convert 712345678 to +254712345678
+                phone = '+254' + phone
+            elif not phone.startswith('+254'):
+                # If it doesn't match any pattern, assume it needs +254
+                phone = '+254' + phone.lstrip('+')
+            
+            self.phonenumber = phone
+        
+        super().save(*args, **kwargs)
+    
     
     class Meta:
         verbose_name = _('user')
@@ -106,34 +131,55 @@ class Store(models.Model):
         return self.accessories.count()
 
 class MachineType(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     type = models.CharField(max_length=255)
     brand = models.CharField(max_length=255)
-    color = models.CharField(max_length=255)
+    color = models.CharField(max_length=100)
+    description = models.TextField(blank=True, null=True)
+    image1 = models.ImageField(upload_to='machine_types/', blank=True, null=True)
+    image2 = models.ImageField(upload_to='machine_types/', blank=True, null=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return self.name
+        return f"{self.name} - {self.brand}"
+
+    class Meta:
+        ordering = ['-created_at']
 
 class PartType(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     type = models.CharField(max_length=255)
     brand = models.CharField(max_length=255)
-    color = models.CharField(max_length=255)
+    color = models.CharField(max_length=100)
+    description = models.TextField(blank=True, null=True)
+    image1 = models.ImageField(upload_to='part_types/', blank=True, null=True)
+    image2 = models.ImageField(upload_to='part_types/', blank=True, null=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return self.name
-    
+        return f"{self.name} - {self.brand}"
+
+    class Meta:
+        ordering = ['-created_at']
+
 class AccessoryType(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     type = models.CharField(max_length=255)
     brand = models.CharField(max_length=255)
-    color = models.CharField(max_length=255)
+    color = models.CharField(max_length=100)
+    description = models.TextField(blank=True, null=True)
+    image1 = models.ImageField(upload_to='accessory_types/', blank=True, null=True)
+    image2 = models.ImageField(upload_to='accessory_types/', blank=True, null=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return self.name
+        return f"{self.name} - {self.brand}"
+
+    class Meta:
+        ordering = ['-created_at']
 
 class Client(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -169,7 +215,7 @@ class Machine(models.Model):
     serial_no = models.CharField(max_length=255, unique=True)
     unit_value = models.PositiveIntegerField()
     quantity = models.PositiveIntegerField()
-    description = models.JSONField(default=list)
+    condition_description = models.JSONField(default=list)
     created_at = models.DateTimeField(default=timezone.now)
     machine_condition = models.CharField(max_length=20, choices=MACHINE_CONDITION_CHOICES)
     color_type = models.CharField(max_length=100)
@@ -214,7 +260,7 @@ class Part(models.Model):
     unit_value = models.PositiveIntegerField()
     intial_quantity = models.PositiveIntegerField()
     quantity = models.PositiveIntegerField()
-    description = models.JSONField(default=list)
+    condition_description = models.JSONField(default=list)
     created_at = models.DateTimeField(default=timezone.now)
     part_condition = models.CharField(max_length=20, choices=PART_CONDITION_CHOICES)
     color_type = models.CharField(max_length=100)
@@ -273,7 +319,7 @@ class Accessory(models.Model):
     unit_value = models.PositiveIntegerField()
     intial_quantity = models.PositiveIntegerField()
     quantity = models.PositiveIntegerField()
-    description = models.JSONField(default=list)
+    conditon_description = models.JSONField(default=list)
     created_at = models.DateTimeField(default=timezone.now)
     acc_condition = models.CharField(max_length=20, choices=ACCESSORY_CONDITION_CHOICES)
     color_type = models.CharField(max_length=100)
@@ -365,9 +411,20 @@ class Call(models.Model):
         else:
             return f"{self.ticket_no} - {self.client_name} ({self.client_location})"
 
+    def check_and_update_status(self):
+        """
+        Check if both approvals are True and update status to Complete if needed
+        """
+        if self.client_verification and self.technician_manager_approval:
+            self.status = 'Complete'
+    
     def save(self, *args, **kwargs):
         if not self.ticket_no:
             self.ticket_no = self.generate_ticket_number()
+        
+        # Check and update status before saving
+        self.check_and_update_status()
+        
         super().save(*args, **kwargs)
 
     def generate_ticket_number(self):
@@ -660,7 +717,7 @@ class ChatMessage(models.Model):
 class LeasePartInquiry(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     lease = models.ForeignKey(LeaseContract, on_delete=models.CASCADE, related_name='part_inquiries')
-    store_inquiry = models.ForeignKey(StoreInquiry, on_delete=models.CASCADE, related_name='lease_part_inquiries')
+    store_inquiry = models.ForeignKey(StoreInquiry, on_delete=models.CASCADE, related_name='lease_part_inquiries', null=True, blank=True)
     part = models.ForeignKey(Part, on_delete=models.PROTECT)
     quantity = models.PositiveIntegerField()
     amount = models.DecimalField(max_digits=10, decimal_places=2)
@@ -703,3 +760,61 @@ class MeterReading(models.Model):
 
     def __str__(self):
         return f"{self.lease.lease_no} - {self.month.strftime('%b %Y')}"
+    
+class Quotation(models.Model):
+    STATUS_CHOICES = [
+        ('Draft', 'Draft'),
+        ('Sent', 'Sent'),
+        ('Accepted', 'Accepted'),
+        ('Rejected', 'Rejected'),
+        ('Expired', 'Expired'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    quotation_no = models.CharField(max_length=50, unique=True)
+    client = models.ForeignKey(Client, on_delete=models.PROTECT, null=True, blank=True)
+    client_name = models.CharField(max_length=255, blank=True)
+    client_location = models.CharField(max_length=255, blank=True)
+    created_by = models.ForeignKey(CustomUser, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    valid_until = models.DateField()
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    vat_rate = models.DecimalField(max_digits=5, decimal_places=2, default=16)
+    vat_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    include_vat = models.BooleanField(default=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')
+    notes = models.TextField(blank=True)
+
+    def save(self, *args, **kwargs):
+        if not self.quotation_no:
+            self.quotation_no = self.generate_quotation_number()
+        super().save(*args, **kwargs)
+
+    def generate_quotation_number(self):
+        now = timezone.now()
+        random_num = random.randint(10000, 99999)
+        return f"QUO-{now.month:02d}/{now.strftime('%y')}/{random_num}"
+
+class QuotationItem(models.Model):
+    ITEM_TYPE_CHOICES = [
+        ('MachineType', 'Machine Type'),
+        ('PartType', 'Part Type'),
+        ('AccessoryType', 'Accessory Type'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    quotation = models.ForeignKey(Quotation, on_delete=models.CASCADE, related_name='items')
+    item_type = models.CharField(max_length=20, choices=ITEM_TYPE_CHOICES)
+    item_id = models.UUIDField()
+    item_name = models.CharField(max_length=255)
+    item_brand = models.CharField(max_length=255, blank=True)
+    quantity = models.PositiveIntegerField(default=1)
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+    total_price = models.DecimalField(max_digits=10, decimal_places=2)
+    description = models.TextField(blank=True)
+
+    def save(self, *args, **kwargs):
+        self.total_price = self.quantity * self.unit_price
+        super().save(*args, **kwargs)

@@ -1,11 +1,13 @@
 import re
+from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions, status, filters, viewsets
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, Sale, SaleItem, Store, Call, ServiceCallToken, StoreInquiry
-from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, SaleSerializer, StoreInquirySerializer, UserSerializer, RegisterSerializer, StoreSerializer
-from rest_framework.permissions import IsAuthenticated
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, Quotation, Sale, SaleItem, Store, Call, ServiceCallToken, StoreInquiry
+from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, QuotationSerializer, SaleSerializer, StoreInquirySerializer, UserSerializer, RegisterSerializer, StoreSerializer
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import api_view, permission_classes, action
+from rest_framework.views import APIView
 from django.db.models import Q, Count, Max, Prefetch, Sum
 from django.db import transaction
 from channels.layers import get_channel_layer
@@ -17,9 +19,14 @@ from rest_framework.pagination import PageNumberPagination
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework.exceptions import ValidationError
-from decimal import Decimal, InvalidOperation  # Add this line
-
-
+from decimal import Decimal, InvalidOperation
+from django.http import HttpResponse, JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+from django.middleware.csrf import get_token
+from rest_framework import permissions, viewsets
+from django.template.loader import render_to_string
+from xhtml2pdf import pisa
 
 class UserListCreate(generics.ListCreateAPIView):
     queryset = CustomUser.objects.all()
@@ -38,6 +45,12 @@ class UserRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
     parser_classes = [MultiPartParser, FormParser]
     lookup_field = 'id'
 
+    def get_serializer_context(self):
+        """Add request to serializer context for building absolute URLs"""
+        context = super().get_serializer_context()
+        context['request'] = self.request
+        return context
+
     def perform_update(self, serializer):
         # Allow Directors to edit any user, others only themselves
         if not (self.request.user.role == 'Director' or 
@@ -55,9 +68,6 @@ class UserRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def current_user(request):
-    """
-    Return the currently authenticated user's details
-    """
     serializer = UserSerializer(request.user)
     return Response(serializer.data)
 
@@ -464,10 +474,11 @@ class ClientMachineViewSet(viewsets.ModelViewSet):
             )
         return ClientMachine.objects.all()
 
+@method_decorator(csrf_exempt, name='dispatch')
 class CallViewSet(viewsets.ModelViewSet):
     queryset = Call.objects.all()  
     serializer_class = CallSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [permissions.IsAuthenticated]
     
     def get_queryset(self):
         status = self.request.query_params.get('status')
@@ -518,6 +529,8 @@ class CallViewSet(viewsets.ModelViewSet):
     
     def update(self, request, *args, **kwargs):
         instance = self.get_object()
+        old_status = instance.status
+
         serializer = self.get_serializer(instance, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         
@@ -530,7 +543,14 @@ class CallViewSet(viewsets.ModelViewSet):
             updated_data['status'] = 'Complete'
         
         self.perform_update(serializer)
-        return Response(serializer.data)
+        
+        # Add status change info to response
+        instance.refresh_from_db()
+        response_data = serializer.data
+        response_data['status_changed'] = old_status != serializer.instance.status
+        response_data['previous_status'] = old_status
+        
+        return Response(response_data)
 
     @action(detail=True, methods=['post'])
     def create_access_token(self, request, pk=None):
@@ -555,46 +575,110 @@ class CallViewSet(viewsets.ModelViewSet):
             'token': str(token.id),
             'expires_at': token.expires_at
         })
-
-    @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny])
-    def validate_token(self, request):
-        """
-        Validate a token and return the associated service call if valid
-        """
-        if request.method == 'OPTIONS':
-            response = Response()
-            response['Access-Control-Allow-Origin'] = '*'
-            response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-            response['Access-Control-Allow-Headers'] = 'X-ServiceCall-Token, Content-Type'
-            response['Access-Control-Max-Age'] = '86400'  # 24 hours
-            return response
         
+    @action(detail=True, methods=['patch'])
+    def update_approval(self, request, pk=None):
+        """Dedicated endpoint for approval updates"""
+        call = self.get_object()
+        field = request.data.get('field')
+        value = request.data.get('value')
+        old_status = call.status
+        
+        if field in ['technician_manager_approval', 'client_verification']:
+            setattr(call, field, value)
+            call.save()  # This will trigger status update
+            
+        serializer = self.get_serializer(call)
+        response_data = serializer.data
+        response_data['status_changed'] = old_status != call.status
+        response_data['previous_status'] = old_status
+        
+        return Response(response_data)
+    
+@method_decorator(csrf_exempt, name='dispatch')
+class CallValidateTokenView(APIView):
+    """
+    Dedicated view for token validation - accessible without authentication
+    """
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []  # Explicitly disable authentication
+    
+    def options(self, request, *args, **kwargs):
+        """Handle preflight CORS requests"""
+        response = Response()
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response['Access-Control-Allow-Headers'] = 'X-Token-Validation, Content-Type, Authorization'
+        response['Access-Control-Max-Age'] = '86400'
+        return response
+    
+    def get(self, request, *args, **kwargs):
+        """Validate a token and return the associated service call if valid"""
         token_id = request.query_params.get('token')
         
         if not token_id:
-            return Response({'error': 'Token is required'}, status=400)
+            return Response({'error': 'Token is required'}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
+            # Validate UUID format
             if not re.match(r'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$', token_id):
-                return Response({'error': 'Invalid token format'}, status=400)
-            token = ServiceCallToken.objects.get(id=token_id)
+                return Response({'error': 'Invalid token format'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            token = ServiceCallToken.objects.select_related('service_call').get(id=token_id)
         except ServiceCallToken.DoesNotExist:
-            return Response({'error': 'Invalid token'}, status=404)
+            return Response({'error': 'Invalid token'}, status=status.HTTP_404_NOT_FOUND)
         
         if not token.is_valid():
             return Response({
                 'error': 'Token has expired or has been used',
                 'expired': True
-            }, status=403)
+            }, status=status.HTTP_401_UNAUTHORIZED)
         
         # Return the service call data
-        serializer = self.get_serializer(token.service_call)
-        return Response(serializer.data) 
+        call = token.service_call
+        serializer = CallSerializer(call)
+        data = serializer.data
+        
+        # Add token validation confirmation
+        response_data = {
+            'valid': True,
+            'serviceCall': data,
+            **data  # Flatten the data for easier access
+        }
+        
+        response = Response(response_data)
+        response['Access-Control-Allow-Origin'] = '*'
+        return response
 
-    @action(detail=True, methods=['post'], permission_classes=[permissions.AllowAny])
-    def verify(self, request, pk=None):
-        call = self.get_object()
+
+@method_decorator(csrf_exempt, name='dispatch')
+class CallVerifyTokenView(APIView):
+    """
+    Dedicated view for service call verification - accessible without authentication
+    """
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []  # Explicitly disable authentication
+    
+    def options(self, request, *args, **kwargs):
+        """Handle preflight CORS requests"""
+        response = Response()
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response['Access-Control-Allow-Headers'] = 'Content-Type'
+        response['Access-Control-Max-Age'] = '86400'
+        return response
+    
+    def post(self, request, pk=None, *args, **kwargs):
+        """Verify service call completion using token"""
+        try:
+            call = Call.objects.get(pk=pk)
+        except Call.DoesNotExist:
+            return Response({'error': 'Service call not found'}, status=status.HTTP_404_NOT_FOUND)
+            
         token = request.data.get('token')
+        
+        if not token:
+            return Response({'error': 'Token is required'}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
             service_token = ServiceCallToken.objects.get(
@@ -603,42 +687,36 @@ class CallViewSet(viewsets.ModelViewSet):
                 is_used=False,
                 expires_at__gt=timezone.now()
             )
+
+             # Store old status for comparison
+            old_status = call.status
+            
+            # Update the service call
             call.client_verification = True
+            
+            # Check if both approvals are now True and auto-complete
+            if call.client_verification and call.technician_manager_approval:
+                call.status = 'Complete'
+            
             call.save()
+            
+            # Mark token as used
             service_token.is_used = True
             service_token.save()
-            return Response({'status': 'verified'})
+            
+            # Return response with status update info
+            response_data = {
+                'status': 'verified',
+                'service_call_status': call.status,
+                'status_changed': old_status != call.status
+            }
+            
+            response = Response(response_data)
+            response['Access-Control-Allow-Origin'] = '*'
+            return response
+            
         except ServiceCallToken.DoesNotExist:
-            return Response({'error': 'Invalid or expired token'}, status=400)
-        
-    @action(detail=True, methods=['patch'])
-    def update_approval(self, request, pk=None):
-        """Dedicated endpoint for approval updates"""
-        call = self.get_object()
-        field = request.data.get('field')
-        value = request.data.get('value')
-        
-        # Validate the field
-        if field not in ['technician_manager_approval', 'client_verification']:
-            return Response({'error': 'Invalid field'}, status=400)
-        
-        # Validate the value
-        if not isinstance(value, bool):
-            return Response({'error': 'Value must be a boolean'}, status=400)
-        
-        # Update the field
-        setattr(call, field, value)
-        
-        # Check if both approvals are now true and auto-complete
-        if call.technician_manager_approval and call.client_verification and call.status != 'Complete':
-            call.status = 'Complete'
-        
-        # Save the changes
-        call.save()
-        
-        # Return serialized response
-        serializer = self.get_serializer(call)
-        return Response(serializer.data)
+            return Response({'error': 'Invalid or expired token'}, status=status.HTTP_400_BAD_REQUEST)
 
 class LeaseContractViewSet(viewsets.ModelViewSet):
     serializer_class = LeaseContractSerializer
@@ -654,16 +732,28 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         client_id = self.request.query_params.get('client')
         if client_id:
-            return LeaseContract.objects.filter(client=client_id).select_related('client', 'item', 'store')
+            return LeaseContract.objects.filter(client=client_id).select_related('client', 'item', 'store').prefetch_related('meter_readings')
         return LeaseContract.objects.all().select_related('client', 'item', 'store')
 
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            # Return machine to store
+            machine = instance.item
+            machine.machine_status = 'Available'
+            machine.save()
+            
+            # Delete lease
+            instance.delete()
     
 class SaleViewSet(viewsets.ModelViewSet):
     serializer_class = SaleSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        queryset = Sale.objects.all().select_related('client').prefetch_related(
+        queryset = Sale.objects.annotate(
+            total_price=Sum('items__total_price'),
+            items_count=Count('items')
+        ).select_related('client').prefetch_related(
             'items__machine',
             'items__part',
             'items__accessory'
@@ -698,6 +788,29 @@ class SaleViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
         return Response(serializer.data)
+    
+    def perform_destroy(self, instance):
+        # Return items to store before deleting sale
+        for item in instance.items.all():
+            if item.machine:
+                machine = item.machine
+                machine.machine_status = 'Available'
+                machine.save()
+            elif item.part:
+                part = item.part
+                part.quantity += item.quantity
+                if part.quantity > 0 and part.part_status == 'Out of Stock':
+                    part.part_status = 'Available'
+                part.save()
+            elif item.accessory:
+                accessory = item.accessory
+                accessory.quantity += item.quantity
+                if accessory.quantity > 0 and accessory.acc_status == 'Out of Stock':
+                    accessory.acc_status = 'Available'
+                accessory.save()
+        
+        # Delete the sale
+        instance.delete()
     
 class DeliveryViewSet(viewsets.ModelViewSet):
     queryset = Delivery.objects.all()
@@ -980,14 +1093,15 @@ class LeasePartInquiryViewSet(viewsets.ModelViewSet):
             instance = serializer.save()
             
             # Update the part inventory
-            part = instance.part
-            if part.quantity >= instance.quantity:
-                part.quantity -= instance.quantity
-                part.save()
-            else:
-                raise serializer.ValidationError(
-                    f"Insufficient stock. Only {part.quantity} units available."
-                )
+            if not instance.store_inquiry:
+                part = instance.part
+                if part.quantity >= instance.quantity:
+                    part.quantity -= instance.quantity
+                    part.save()
+                else:
+                    raise serializer.ValidationError(
+                        f"Insufficient stock. Only {part.quantity} units available."
+                    )
 
     def perform_update(self, serializer):
         with transaction.atomic():
@@ -1042,3 +1156,45 @@ class MeterReadingViewSet(viewsets.ModelViewSet):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['lease__lease_no', 'machine__serial_no']
     ordering_fields = ['month', 'created_at']
+
+class QuotationViewSet(viewsets.ModelViewSet):
+    queryset = Quotation.objects.all()
+    serializer_class = QuotationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        status = self.request.query_params.get('status')
+        client_id = self.request.query_params.get('client_id')
+        
+        queryset = super().get_queryset()
+        
+        if status:
+            queryset = queryset.filter(status=status)
+        if client_id:
+            queryset = queryset.filter(client_id=client_id)
+        
+        return queryset.select_related('client', 'created_by').prefetch_related('items')
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+    
+class QuotationPDFView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        quotation = get_object_or_404(Quotation, pk=pk)
+        
+        # Render HTML template with context
+        template = 'quotation_pdf.html'
+        context = {'quotation': quotation}
+        html = render_to_string(template, context)
+        
+        # Create PDF response
+        response = HttpResponse(content_type='application/pdf')
+        response['Content-Disposition'] = f'filename="quotation_{quotation.quotation_no}.pdf"'
+        
+        # Generate PDF
+        pisa_status = pisa.CreatePDF(html, dest=response)
+        if pisa_status.err:
+            return HttpResponse('PDF generation error', status=500)
+        return response
