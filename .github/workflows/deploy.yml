@@ -83,16 +83,23 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+          
+      - name: Test SSH Connection
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo 'SSH connection successful'"
+          
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT || 22 }}
-          debug: true
-          script_stop: true 
-          script: |
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
             echo "🚀 Starting deployment process..."
             
             # Navigate to your project directory
@@ -160,6 +167,22 @@ jobs:
             docker-compose ps
             
             echo "✅ Deployment completed successfully!"
-            
-          # Set timeout for the entire deployment process (15 minutes)
-          timeout: 900s
+          EOF
+
+  # Optional: Send notification on deployment status
+  notify:
+    name: Send Notification
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: always() && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Send notification on success
+        if: needs.deploy.result == 'success'
+        run: |
+          echo "✅ Deployment successful! Your server has been updated."
+          
+      - name: Send notification on failure
+        if: needs.deploy.result == 'failure'
+        run: |
+          echo "❌ Deployment failed! Check the logs for details."
