@@ -88,14 +88,55 @@ jobs:
         
       - name: Setup SSH Key
         run: |
+          echo "🔧 Setting up SSH key..."
           mkdir -p ~/.ssh
+          
+          # Check if secrets are available
+          if [ -z "${{ secrets.SERVER_HOST }}" ]; then
+            echo "❌ SERVER_HOST secret is empty or not set"
+            exit 1
+          fi
+          
+          if [ -z "${{ secrets.SERVER_USER }}" ]; then
+            echo "❌ SERVER_USER secret is empty or not set"
+            exit 1
+          fi
+          
+          if [ -z "${{ secrets.SERVER_SSH_KEY }}" ]; then
+            echo "❌ SERVER_SSH_KEY secret is empty or not set"
+            exit 1
+          fi
+          
+          echo "✅ All secrets are present"
+          echo "🔑 SERVER_HOST: ${{ secrets.SERVER_HOST }}"
+          echo "👤 SERVER_USER: ${{ secrets.SERVER_USER }}"
+          
+          # Setup SSH key
           echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+          
+          # Add host to known_hosts
+          echo "🔍 Adding host to known_hosts..."
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts || {
+            echo "⚠️ ssh-keyscan failed, trying with StrictHostKeyChecking=no"
+          }
           
       - name: Test SSH Connection
         run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo 'SSH connection successful'"
+          echo "🧪 Testing SSH connection..."
+          echo "Host: ${{ secrets.SERVER_HOST }}"
+          echo "User: ${{ secrets.SERVER_USER }}"
+          
+          # Test SSH connection with verbose output
+          ssh -v -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo 'SSH connection successful'; whoami; pwd; ls -la" || {
+            echo "❌ SSH connection failed"
+            echo "🔍 Checking SSH key format..."
+            head -n 1 ~/.ssh/deploy_key
+            tail -n 1 ~/.ssh/deploy_key
+            echo "🔍 Key file permissions:"
+            ls -la ~/.ssh/deploy_key
+            exit 1
+          }
           
       - name: Deploy via SSH
         run: |
