@@ -90,6 +90,8 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
+          debug: true
+          script_stop: true 
           script: |
             echo "🚀 Starting deployment process..."
             
