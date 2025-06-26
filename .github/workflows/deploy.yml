@@ -126,6 +126,7 @@ jobs:
           echo "🧪 Testing SSH connection..."
           echo "Host: ${{ secrets.SERVER_HOST }}"
           echo "User: ${{ secrets.SERVER_USER }}"
+          echo "Port: 2222"
           
           # Test SSH connection with verbose output and custom port
           ssh -v -i ~/.ssh/deploy_key -p 2222 -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo 'SSH connection successful'; whoami; pwd; ls -la" || {
@@ -140,7 +141,7 @@ jobs:
           
       - name: Deploy via SSH
         run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+          ssh -i ~/.ssh/deploy_key -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
             echo "🚀 Starting deployment process..."
             
             # Navigate to your project directory
