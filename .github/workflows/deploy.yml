@@ -115,7 +115,7 @@ jobs:
           echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           
-          # Add host to known_hosts with custom port
+          # Add host to known_hosts with port 2222
           echo "🔍 Adding host to known_hosts..."
           ssh-keyscan -p 2222 -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts || {
             echo "⚠️ ssh-keyscan failed, trying with StrictHostKeyChecking=no"
@@ -128,7 +128,7 @@ jobs:
           echo "User: ${{ secrets.SERVER_USER }}"
           echo "Port: 2222"
           
-          # Test SSH connection with verbose output and custom port
+          # Test SSH connection with verbose output and port 2222
           ssh -v -i ~/.ssh/deploy_key -p 2222 -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo 'SSH connection successful'; whoami; pwd; ls -la" || {
             echo "❌ SSH connection failed"
             echo "🔍 Checking SSH key format..."
@@ -163,7 +163,16 @@ jobs:
             echo "🛑 Stopping services..."
             # Stop the services gracefully
             docker-compose stop backend_bititecsystems emailserver_bititecsystems
-            
+
+      - name: Remove old containers
+            echo "🗑️ Removing old containers..."
+        run: | 
+          cd shared
+          docker-compose down --remove-orphans
+
+      - name: Build and Start Services
+        run: |
+          cd shared
             echo "🔨 Building updated images..."
             # Rebuild the images with no cache to ensure fresh build
             docker-compose build --no-cache backend_bititecsystems emailserver_bititecsystems
