@@ -165,14 +165,18 @@ jobs:
             docker-compose stop backend_bititecsystems emailserver_bititecsystems
 
       - name: Remove old containers
-            echo "🗑️ Removing old containers..."
         run: | 
+          cd ${{ secrets.SERVER_PATH }}
+
+          # Navigate to docker-compose directory
           cd shared
+
+          echo "🗑️ Removing old containers..."
           docker-compose down --remove-orphans
 
       - name: Build and Start Services
         run: |
-          cd shared
+          cd ${{ secrets.SERVER_PATH }}
             echo "🔨 Building updated images..."
             # Rebuild the images with no cache to ensure fresh build
             docker-compose build --no-cache backend_bititecsystems emailserver_bititecsystems
