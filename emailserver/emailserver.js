@@ -96,7 +96,8 @@ app.post('/send-service-call', async (req, res) => {
     
     // Generate the access link
     // Frontend URL should match your React app URL
-    const serviceCallLink = `http://localhost:3000/customer-service-call/${serviceCallId}?token=${tokenId}`;
+    const baseUrl = process.env.FRONTEND_URL || 'https://bititecsystem.web.app';
+    const serviceCallLink = `${baseUrl}/customer-service-call/${serviceCallId}?token=${tokenId}`;
     
     const subject = `Service Call Details: ${ticketNo} for ${clientName}, ${clientLocation}`;
     
@@ -313,6 +314,10 @@ app.post('/send-quotation', async (req, res) => {
   }
 });
 
-app.listen(port, () => {
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+app.listen(port, '0.0.0.0', () => {
   logger.debug(`Email server running at http://localhost:${port}`);
 });

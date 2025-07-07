@@ -147,158 +147,62 @@ class StoreSerializer(serializers.ModelSerializer):
     def get_machines_count(self, obj):
         return obj.machines.count()
     
-class AccessoryTypeSerializer(serializers.ModelSerializer):
+class BaseTypeSerializer(serializers.ModelSerializer):
     image1_url = serializers.SerializerMethodField()
     image2_url = serializers.SerializerMethodField()
 
     class Meta:
+        abstract = True
+        fields = [
+            'id', 'name', 'type', 'brand', 'color', 'description',
+            'image1', 'image2', 'image1_url', 'image2_url',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['uuid', 'created_at', 'updated_at']
+
+    def get_image1_url(self, obj):
+        if obj.image1:
+            request = self.context.get('request')
+            return request.build_absolute_uri(obj.image1.url) if request else obj.image1.url
+        return None
+
+    def get_image2_url(self, obj):
+        if obj.image2:
+            request = self.context.get('request')
+            return request.build_absolute_uri(obj.image2.url) if request else obj.image2.url
+        return None
+
+    def update(self, instance, validated_data):
+        image1 = validated_data.pop('image1', None)
+        image2 = validated_data.pop('image2', None)
+
+        if image1 is not None:
+            if instance.image1:
+                instance.image1.delete()
+            instance.image1 = image1
+        if image2 is not None:
+            if instance.image2:
+                instance.image2.delete()
+            instance.image2 = image2
+
+        # Update remaining fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        instance.save()
+        return instance
+
+class AccessoryTypeSerializer(BaseTypeSerializer):
+    class Meta(BaseTypeSerializer.Meta):
         model = AccessoryType
-        fields = ['id', 'name', 'type', 'brand', 'color', 'description', 
-                 'image1', 'image2', 'image1_url', 'image2_url', 
-                 'created_at', 'updated_at']
-        read_only_fields = ['created_at', 'updated_at']
 
-    def get_image1_url(self, obj):
-        if obj.image1:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.image1.url)
-            return obj.image1.url
-        return None
-
-    def get_image2_url(self, obj):
-        if obj.image2:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.image2.url)
-            return obj.image2.url
-        return None
-
-    def update(self, instance, validated_data):
-        # Handle image updates properly
-        image1 = validated_data.get('image1', None)
-        image2 = validated_data.get('image2', None)
-        
-        if image1 is not None:
-            if instance.image1:
-                instance.image1.delete()
-            instance.image1 = image1
-        
-        if image2 is not None:
-            if instance.image2:
-                instance.image2.delete()
-            instance.image2 = image2
-        
-        # Update other fields
-        for attr, value in validated_data.items():
-            if attr not in ['image1', 'image2']:
-                setattr(instance, attr, value)
-        
-        instance.save()
-        return instance
-
-class MachineTypeSerializer(serializers.ModelSerializer):
-    image1_url = serializers.SerializerMethodField()
-    image2_url = serializers.SerializerMethodField()
-
-    class Meta:
+class MachineTypeSerializer(BaseTypeSerializer):
+    class Meta(BaseTypeSerializer.Meta):
         model = MachineType
-        fields = ['id', 'name', 'type', 'brand', 'color', 'description', 
-                 'image1', 'image2', 'image1_url', 'image2_url', 
-                 'created_at', 'updated_at']
-        read_only_fields = ['created_at', 'updated_at']
 
-    def get_image1_url(self, obj):
-        if obj.image1:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.image1.url)
-            return obj.image1.url
-        return None
-
-    def get_image2_url(self, obj):
-        if obj.image2:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.image2.url)
-            return obj.image2.url
-        return None
-
-    def update(self, instance, validated_data):
-        # Handle image updates properly
-        image1 = validated_data.get('image1', None)
-        image2 = validated_data.get('image2', None)
-        
-        if image1 is not None:
-            # Delete old image if it exists
-            if instance.image1:
-                instance.image1.delete()
-            instance.image1 = image1
-        
-        if image2 is not None:
-            # Delete old image if it exists
-            if instance.image2:
-                instance.image2.delete()
-            instance.image2 = image2
-        
-        # Update other fields
-        for attr, value in validated_data.items():
-            if attr not in ['image1', 'image2']:
-                setattr(instance, attr, value)
-        
-        instance.save()
-        return instance
-
-class PartTypeSerializer(serializers.ModelSerializer):
-    image1_url = serializers.SerializerMethodField()
-    image2_url = serializers.SerializerMethodField()
-
-    class Meta:
+class PartTypeSerializer(BaseTypeSerializer):
+    class Meta(BaseTypeSerializer.Meta):
         model = PartType
-        fields = ['id', 'name', 'type', 'brand', 'color', 'description', 
-                 'image1', 'image2', 'image1_url', 'image2_url', 
-                 'created_at', 'updated_at']
-        read_only_fields = ['created_at', 'updated_at']
-
-    def get_image1_url(self, obj):
-        if obj.image1:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.image1.url)
-            return obj.image1.url
-        return None
-
-    def get_image2_url(self, obj):
-        if obj.image2:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.image2.url)
-            return obj.image2.url
-        return None
-
-    def update(self, instance, validated_data):
-        # Handle image updates properly
-        image1 = validated_data.get('image1', None)
-        image2 = validated_data.get('image2', None)
-        
-        if image1 is not None:
-            if instance.image1:
-                instance.image1.delete()
-            instance.image1 = image1
-        
-        if image2 is not None:
-            if instance.image2:
-                instance.image2.delete()
-            instance.image2 = image2
-        
-        # Update other fields
-        for attr, value in validated_data.items():
-            if attr not in ['image1', 'image2']:
-                setattr(instance, attr, value)
-        
-        instance.save()
-        return instance
-        fields = ['id', 'name', 'type', 'brand', 'color']
 
 class MachineSerializer(serializers.ModelSerializer):
     store_name = serializers.CharField(source='store.store_name', read_only=True)
