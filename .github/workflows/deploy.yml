@@ -227,9 +227,18 @@ jobs:
               echo "🔧 Loading environment variables..."
               source /home/bititec_server/shared/scripts/load_env.sh
             fi
+
+           # Navigate to docker compose directory
+            cd "$HOME/shared"
             
-            # Navigate to docker compose directory
-            cd shared
+            # Verify docker-compose.yml exists
+            if [ ! -f "docker-compose.yml" ]; then
+              echo "❌ docker-compose.yml not found in $(pwd)"
+              ls -la
+              exit 1
+            fi
+            
+            echo "✅ Found docker-compose.yml in $(pwd)"
             
             echo "🛑 Stopping services gracefully..."
             # Stop the services gracefully
