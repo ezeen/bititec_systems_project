@@ -144,8 +144,20 @@ jobs:
           ssh -i ~/.ssh/deploy_key -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
             echo "🚀 Starting deployment process..."
             
-            # Navigate to your project directory where the repo is cloned
+           # Navigate to your production directory (which is also your Git repo)
             cd ${{ secrets.SERVER_PATH }}
+            echo "📂 Current directory: $(pwd)"
+            
+            # Verify this is a git repository
+            if [ ! -d ".git" ]; then
+              echo "❌ Error: Not a git repository!"
+              exit 1
+            fi
+            
+            # Show current branch and status
+            echo "🔍 Git status before pull:"
+            git status --porcelain
+            echo "🌟 Current branch: $(git branch --show-current)"
             
             # Stash any local changes to avoid conflicts
             echo "💾 Stashing any local changes..."
@@ -216,74 +228,74 @@ jobs:
               source /home/bititec_server/shared/scripts/load_env.sh
             fi
             
-            # Navigate to docker-compose directory
+            # Navigate to docker compose directory
             cd shared
             
             echo "🛑 Stopping services gracefully..."
             # Stop the services gracefully
-            docker-compose stop backend_bititecsystems emailserver_bititecsystems
+            docker compose stop backend_bititecsystems emailserver_bititecsystems
 
             echo "🗑️ Removing old containers..."
-            docker-compose down --remove-orphans
+            docker compose down --remove-orphans
 
             echo "🧹 Pruning unused images & volumes..."
             docker system prune -f
 
             echo "🔨 Building updated images with latest code..."
             # Rebuild the images with no cache to ensure fresh build with new code
-            docker-compose build --no-cache backend_bititecsystems emailserver_bititecsystems
+            docker compose build --no-cache backend_bititecsystems emailserver_bititecsystems
             
             echo "🚀 Starting services..."
             # Start the services
-            docker-compose up -d nginx backend_bititecsystems emailserver_bititecsystems db_bititecsystems
+            docker compose up -d nginx backend_bititecsystems emailserver_bititecsystems db_bititecsystems
             
             # Wait for services to be ready
             echo "⏳ Waiting for services to start..."
             sleep 45
             
             # Check if backend container is running before executing commands
-            if docker-compose ps backend_bititecsystems | grep -q "Up"; then
+            if docker compose ps backend_bititecsystems | grep -q "Up"; then
               echo "✅ Backend container is running"
               
               # Check for pending migrations first
               echo "🔍 Checking for pending migrations..."
-              docker-compose exec -T backend_bititecsystems python manage.py showmigrations --plan || echo "⚠️ Could not check migration status"
+              docker compose exec -T backend_bititecsystems python manage.py showmigrations --plan || echo "⚠️ Could not check migration status"
               
               echo "🗄️ Making new migrations (if any)..."
               # Make migrations for any model changes
-              docker-compose exec -T backend_bititecsystems python manage.py makemigrations
+              docker compose exec -T backend_bititecsystems python manage.py makemigrations
               
               echo "🗄️ Applying database migrations..."
               # Apply all migrations
-              docker-compose exec -T backend_bititecsystems python manage.py migrate
+              docker compose exec -T backend_bititecsystems python manage.py migrate
               
               echo "📁 Collecting static files..."
               # Collect static files
-              docker-compose exec -T backend_bititecsystems python manage.py collectstatic --noinput
+              docker compose exec -T backend_bititecsystems python manage.py collectstatic --noinput
               
               # Verify migrations are up to date
               echo "✅ Verifying all migrations are applied..."
-              docker-compose exec -T backend_bititecsystems python manage.py showmigrations
+              docker compose exec -T backend_bititecsystems python manage.py showmigrations
               
               echo "🔄 Restarting services to ensure everything is fresh..."
               # Restart all services to ensure everything is properly connected
-              docker-compose restart backend_bititecsystems emailserver_bititecsystems
+              docker compose restart backend_bititecsystems emailserver_bititecsystems
               
             else
               echo "❌ Backend container failed to start!"
               echo "📋 Backend container logs:"
-              docker-compose logs backend_bititecsystems
+              docker compose logs backend_bititecsystems
               exit 1
             fi
             
-            # Optional: Restart nginx if you have it in your docker-compose
-            if docker-compose ps nginx | grep -q "nginx"; then
+            # Optional: Restart nginx if you have it in your docker compose
+            if docker compose ps nginx | grep -q "nginx"; then
               echo "🔄 Restarting nginx..."
-              docker-compose restart nginx
+              docker compose restart nginx
             fi
             
             echo "📊 Final status check..."
-            docker-compose ps
+            docker compose ps
             
             # Clean up old backups (keep only last 3)
             echo "🧹 Cleaning up old backups..."
