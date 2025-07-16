@@ -308,6 +308,16 @@ class LeaseContractSerializer(serializers.ModelSerializer):
     client = ClientSerializer(read_only=True)
     meter_readings = MeterReadingSerializer(many=True, read_only=True)
     missing_readings = serializers.SerializerMethodField()
+    technician = UserSerializer(read_only=True)
+    technician_id = serializers.PrimaryKeyRelatedField(
+        queryset=CustomUser.objects.filter(
+            role__in=['Technician', 'Technician Manager']
+        ),
+        write_only=True,
+        source='technician',
+        required=False,
+        allow_null=True
+    )
     
     class Meta:
         model = LeaseContract
@@ -315,7 +325,7 @@ class LeaseContractSerializer(serializers.ModelSerializer):
             'id', 'client', 'client_name', 'client_location', 'department', 
             'item', 'item_id', 'item_name', 'client_id',
             'serial_no', 'store', 'store_name', 'from_date', 'to_date', 'add_vat', 'add_myq',
-            'billed_myq', 'is_active', 'contract_type', 'lease_no', 'created_at', 'client', 'meter_readings', 'missing_readings'
+            'billed_myq', 'is_active', 'contract_type', 'lease_no', 'created_at', 'client', 'meter_readings', 'missing_readings', 'technician', 'technician_id'
         ]
         extra_kwargs = {
             'created_at': {'read_only': True},
@@ -634,6 +644,12 @@ class CallSerializer(serializers.ModelSerializer):
     walk_in_machine = serializers.JSONField(write_only=True, required=False)
     
     reported_date = serializers.DateTimeField(format="%Y-%m-%d", required=False)
+
+    action_taken = serializers.CharField(required=False, allow_blank=True)
+    parts_required = serializers.CharField(required=False, allow_blank=True)
+    parts_used = serializers.CharField(required=False, allow_blank=True)
+    start_time = serializers.DateTimeField(format="%Y-%m-%d %H:%M", required=False, allow_null=True)
+    finish_time = serializers.DateTimeField(format="%Y-%m-%d %H:%M", required=False, allow_null=True)
     
     class Meta:
         model = Call
@@ -646,7 +662,8 @@ class CallSerializer(serializers.ModelSerializer):
             'fault_reported', 'action_taken', 'meter_reading', 'parts_required', 'parts_used',
             'comments', 'status', 'department', 'is_checked', 'director_comment', 'ticket_no',
             'spare_description', 'created_at', 'walk_in_machine',
-            'walk_in_machine_name', 'walk_in_machine_type', 'walk_in_serial_no', 'technician_manager_approval', 'client_verification'
+            'walk_in_machine_name', 'walk_in_machine_type', 'walk_in_serial_no', 'technician_manager_approval', 'client_verification',
+            'finish_time', 'start_time'
         ]
         extra_kwargs = {
             'created_at': {'read_only': True},
@@ -669,7 +686,13 @@ class CallSerializer(serializers.ModelSerializer):
             validated_data['walk_in_serial_no'] = walk_in_machine.get('serialNo', '')
         
         call = Call.objects.create(**validated_data)
-        call.technician.set(technicians)
+        if technicians:
+            call.technician.set(technicians)
+            call.status = 'Pending'
+        else:
+            call.status = 'Open'
+        
+        call.save()
         return call
     
     def update(self, instance, validated_data):
@@ -705,7 +728,7 @@ class CallSerializer(serializers.ModelSerializer):
         if client_verification_changed or technician_approval_changed:
             # Check if both approvals are now True and update status
             if instance.client_verification and instance.technician_manager_approval:
-                instance.status = 'Complete'
+                instance.status = 'Closed'
         
         instance.save()
         return instance
@@ -725,6 +748,13 @@ class CallSerializer(serializers.ModelSerializer):
         if instance.contract_type == 'WalkIn' and not instance.client:
             data['client_name'] = instance.client_name or ''
             data['client_location'] = instance.client_location or ''
+
+        # Ensure technician is always a list
+        if 'technician' in data and data['technician'] is not None:
+            if not isinstance(data['technician'], list):
+                data['technician'] = [data['technician']]
+        else:
+            data['technician'] = []
         
         return data
     
@@ -738,22 +768,10 @@ class CallSerializer(serializers.ModelSerializer):
             
             # Validate walk-in specific fields
             client_name = data.get('client_name', '').strip()
-            client_location = data.get('client_location', '').strip()
             
             if not client_name:
                 raise serializers.ValidationError("Client name is required for Walk-In calls")
-            if not client_location:
-                raise serializers.ValidationError("Client location is required for Walk-In calls")
             
-            walk_in_machine = data.get('walk_in_machine')
-            if not walk_in_machine:
-                raise serializers.ValidationError("Machine details are required for Walk-In calls")
-                
-            machine_name = walk_in_machine.get('machineName', '').strip()
-            serial_no = walk_in_machine.get('serialNo', '').strip()
-            
-            if not machine_name or not serial_no:
-                raise serializers.ValidationError("Machine name and serial number are required for Walk-In calls")
             
             return data
             
