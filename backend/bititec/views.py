@@ -491,6 +491,21 @@ class CallViewSet(viewsets.ModelViewSet):
             'item', 
             'item__store'
         ).prefetch_related('technician')
+
+        # Role-based filtering
+        user = self.request.user
+        user_role = user.role.lower() if user.role else ''
+        
+        # Allow full access to these roles
+        allowed_full_access_roles = ['director', 'super admin', 'technician manager']
+        
+        if user_role not in allowed_full_access_roles:
+            # If user is a technician, only show calls assigned to them
+            if user_role == 'technician':
+                queryset = queryset.filter(technician__id=user.id)
+            else:
+                # For other roles, show no calls or handle as needed
+                queryset = queryset.none()
         
         # Status filtering
         if status:
@@ -498,14 +513,17 @@ class CallViewSet(viewsets.ModelViewSet):
                 'open': 'Open',
                 'pending': 'Pending',
                 'in_progress': 'In Progress',
-                'complete': 'Complete'
+                'complete': 'Complete',
+                'completed': 'Completed',
+                'closed': 'Closed'
             }
             backend_status = status_mapping.get(status.lower(), status)
             queryset = queryset.filter(status=backend_status)
 
-        # Technician filtering
+         # Technician filtering
         if technician_id:
             queryset = queryset.filter(technician__id=technician_id)
+
 
         # Date range filtering
         if start_date and end_date:
@@ -527,6 +545,7 @@ class CallViewSet(viewsets.ModelViewSet):
 
         return queryset.order_by('-created_at')
     
+    
     def update(self, request, *args, **kwargs):
         instance = self.get_object()
         old_status = instance.status
@@ -540,7 +559,7 @@ class CallViewSet(viewsets.ModelViewSet):
         client_verification = updated_data.get('client_verification', instance.client_verification)
         
         if technician_approval and client_verification:
-            updated_data['status'] = 'Complete'
+            updated_data['status'] = 'Closed'
         
         self.perform_update(serializer)
         
@@ -551,6 +570,34 @@ class CallViewSet(viewsets.ModelViewSet):
         response_data['previous_status'] = old_status
         
         return Response(response_data)
+    
+    @action(detail=True, methods=['post'])
+    def start_service(self, request, pk=None):
+        """Start service call"""
+        call = self.get_object()
+        if call.status != 'Pending':
+            return Response({'error': 'Service must be in Pending status to start'}, status=400)
+        
+        call.status = 'In Progress'
+        call.start_time = timezone.now()
+        call.save()
+        
+        serializer = self.get_serializer(call)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def complete_service(self, request, pk=None):
+        """Complete service call"""
+        call = self.get_object()
+        if call.status != 'In Progress':
+            return Response({'error': 'Service must be in progress to complete'}, status=400)
+        
+        call.status = 'Completed'
+        call.finish_time = timezone.now()
+        call.save()
+        
+        serializer = self.get_serializer(call)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def create_access_token(self, request, pk=None):
@@ -744,6 +791,29 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
             
             # Delete lease
             instance.delete()
+            
+class LeaseAssignTechnician(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request):
+        client_id = request.data.get('client_id')
+        technician_id = request.data.get('technician_id')
+
+        if not client_id:
+            return Response(
+                {"error": "client_id is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Update all leases for this client
+        leases = LeaseContract.objects.filter(client_id=client_id)
+        updated_count = leases.update(technician_id=technician_id)
+
+        return Response({
+            "status": "success",
+            "updated_count": updated_count,
+            "technician_id": technician_id
+        })
     
 class SaleViewSet(viewsets.ModelViewSet):
     serializer_class = SaleSerializer
