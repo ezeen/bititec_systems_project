@@ -372,7 +372,8 @@ class Call(models.Model):
         ('Open', 'Open'),
         ('Pending', 'Pending'),
         ('In Progress', 'In Progress'),
-        ('Complete', 'Complete'),
+        ('Completed', 'Completed'),  
+        ('Closed', 'Closed'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -383,10 +384,10 @@ class Call(models.Model):
     reported_date = models.DateTimeField(default=timezone.now)
     item = models.ForeignKey(Machine, on_delete=models.PROTECT, null=True, blank=True)
     fault_reported = models.TextField()
-    action_taken = models.JSONField(default=list)
+    action_taken = models.TextField(blank=True, default='')
     meter_reading = models.PositiveIntegerField(default=0)
-    parts_required = models.JSONField(default=list)
-    parts_used = models.JSONField(default=list)
+    parts_required = models.TextField(blank=True, default='')  
+    parts_used = models.TextField(blank=True, default='')
     comments = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Open')
     department = models.CharField(max_length=100)
@@ -404,6 +405,8 @@ class Call(models.Model):
     walk_in_machine_name = models.CharField(max_length=255, blank=True)
     walk_in_machine_type = models.CharField(max_length=255, blank=True)
     walk_in_serial_no = models.CharField(max_length=255, blank=True)
+    start_time = models.DateTimeField(null=True, blank=True)  
+    finish_time = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         if self.client:
@@ -413,18 +416,22 @@ class Call(models.Model):
 
     def check_and_update_status(self):
         """
-        Check if both approvals are True and update status to Complete if needed
+        Updated status logic
         """
         if self.client_verification and self.technician_manager_approval:
-            self.status = 'Complete'
-    
+            self.status = 'Closed'
+        # Only update status if it's not already in progress/completed
+        elif self.status not in ['In Progress', 'Completed']:
+            if self.technician.exists():
+                self.status = 'Pending'
+            else:
+                self.status = 'Open'
+
     def save(self, *args, **kwargs):
         if not self.ticket_no:
             self.ticket_no = self.generate_ticket_number()
         
-        # Check and update status before saving
         self.check_and_update_status()
-        
         super().save(*args, **kwargs)
 
     def generate_ticket_number(self):
@@ -501,6 +508,7 @@ class LeaseContract(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     store = models.ForeignKey(Store, on_delete=models.PROTECT)
+    technician = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_leases', limit_choices_to={'role__in': ['Technician', 'Technician Manager']})
 
     def __str__(self):
         return f"{self.lease_no} - {self.client.client_name}"
