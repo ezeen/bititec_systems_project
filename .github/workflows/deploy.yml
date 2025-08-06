@@ -70,7 +70,9 @@ jobs:
 
       - name: Set up SSH key
         run: |
-          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}"  | tr -d '\r' > ~/.ssh/deploy_key
+          chmod 700 ~/.ssh
           chmod 600 ~/.ssh/deploy_key
           echo "✅ SSH key written"
 
