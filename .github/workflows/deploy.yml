@@ -136,7 +136,7 @@ jobs:
               echo "✅ Backend container is running"
 
               echo "🔍 Existing migrations:"
-              docker compose exec -T backend_bititecsystems ls -l backend/bit_app/migrations || echo "⚠️ No migration files found"
+              docker compose exec -T backend_bititecsystems ls -l backend/bititec/migrations || echo "⚠️ No migration files found"
 
               echo "🗄️ Applying migrations..."
               docker compose exec -T backend_bititecsystems python manage.py migrate
