@@ -1,3 +1,5 @@
+# .github/workflows/deploy.yml
+
 name: CI/CD for BITITECSYSTEM Backend & EmailServer
 
 on:
@@ -7,11 +9,6 @@ on:
       - 'backend/**'
       - 'emailserver/**'
       - '.github/workflows/deploy.yml'
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'backend/**'
-      - 'emailserver/**'
 
 jobs:
   test:
@@ -37,24 +34,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      - name: Cache pip dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install backend dependencies
-        working-directory: backend
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r backend/requirements.txt
 
       - name: Run Django tests
         working-directory: backend
@@ -64,76 +51,58 @@ jobs:
           DB_PASSWORD: postgres
           DB_HOST: localhost
           DB_PORT: 5432
-          SECRET_KEY: test-secret-key-for-testing
+          SECRET_KEY: test-key
           DEBUG: 'True'
-          DJANGO_SETTINGS_MODULE: 'bit_app.settings'
+          DJANGO_SETTINGS_MODULE: bit_app.settings
         run: |
           python manage.py migrate
           python manage.py test
 
   deploy:
-    name: Deploy to Local Production Server via VPS Tunnel
+    name: Deploy via Tunnel to Local Server
     needs: test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main'
 
     steps:
-      - name: Check out repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup SSH Key
+      - name: Set up SSH key
         run: |
-          echo "🔧 Setting up SSH key..."
-          mkdir -p ~/.ssh
           echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -p 22 -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts || true
+          echo "✅ SSH key written"
 
-      - name: Test connection to VPS
+      - name: Add VPS host to known_hosts
         run: |
-          echo "🧪 Testing SSH connection to VPS..."
-          ssh -i ~/.ssh/deploy_key -p 22 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo '✅ Connected to VPS'"
+          ssh-keyscan -p 2222 -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts || true
 
-      - name: Deploy to Local Production via Reverse Tunnel
+      - name: Test SSH connection to local server through VPS tunnel
         run: |
-          ssh -i ~/.ssh/deploy_key -p 22 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
-            echo "🌐 VPS Connected — Tunneling into Local Production..."
+          ssh -v -i ~/.ssh/deploy_key -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo '✅ Connected to local server via reverse tunnel'; whoami"
 
-            # SSH into local production machine through the reverse tunnel
-            ssh -i /home/bititec_server/.ssh/id_rsa_autossh -p 2222 -o StrictHostKeyChecking=no bititec_server@localhost << 'EOL'
+      - name: Deploy via SSH
+        run: |
+          ssh -i ~/.ssh/deploy_key -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+            echo "🚀 Starting deployment on local server..."
 
-              echo "🚀 Starting deployment on LOCAL machine..."
+            cd ${{ secrets.SERVER_PATH }}
+            git stash
+            git reset --hard HEAD
+            git pull origin main
 
-              cd ~/shared
+            cd ~/shared
+            docker compose down
+            docker system prune -f
+            docker compose build --no-cache
+            docker compose up -d
 
-              echo "📦 Pulling latest changes..."
-              git pull origin main
+            echo "✅ Rebuilding backend..."
+            docker compose exec -T backend_bititecsystems python manage.py migrate
+            docker compose exec -T backend_bititecsystems python manage.py collectstatic --noinput
 
-              echo "🛑 Stopping containers..."
-              docker compose down
-
-              echo "🧹 Cleaning up..."
-              docker system prune -f -a --volumes -y
-
-              echo "🔨 Building containers..."
-              docker compose build --no-cache
-
-              echo "🚀 Starting up services..."
-              docker compose up -d nginx backend_bititecsystems emailserver_bititecsystems db_bititecsystems
-
-              echo "⏳ Waiting for services..."
-              sleep 30
-
-              echo "📁 Running migrations & collectstatic..."
-              docker compose exec -T backend_bititecsystems python manage.py migrate
-              docker compose exec -T backend_bititecsystems python manage.py collectstatic --noinput
-
-              echo "🔄 Restarting services..."
-              docker compose restart backend_bititecsystems emailserver_bititecsystems
-
-              echo "✅ Deployment finished on LOCAL machine."
-
-            EOL
+            echo "✅ Deployment complete!"
           EOF
 
   notify:
