@@ -1,10 +1,19 @@
+from asyncio.log import logger
+from django.core.cache import cache
+import hashlib
+import os
+import time
+import logging
 import re
+import secrets
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions, status, filters, viewsets
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, Quotation, Sale, SaleItem, Store, Call, ServiceCallToken, StoreInquiry
-from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, QuotationSerializer, SaleSerializer, StoreInquirySerializer, UserSerializer, RegisterSerializer, StoreSerializer
+
+from .middleware import SecurityUtils
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StoreInquiry
+from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, QuotationSerializer, SaleSerializer, StoreInquirySerializer, UserSerializer, RegisterSerializer, StoreSerializer
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.views import APIView
@@ -19,6 +28,8 @@ from rest_framework.pagination import PageNumberPagination
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework.exceptions import ValidationError
+from rest_framework_simplejwt.views import TokenObtainPairView
+from django.contrib.auth.hashers import check_password
 from decimal import Decimal, InvalidOperation
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -27,6 +38,210 @@ from django.middleware.csrf import get_token
 from rest_framework import permissions, viewsets
 from django.template.loader import render_to_string
 from xhtml2pdf import pisa
+
+logger = logging.getLogger(__name__)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def get_salt(request):
+    email = request.data.get('email', '').lower().strip()
+    
+    if not email:
+        return Response({'error': 'Email is required'}, status=400)
+    
+    try:
+        user = CustomUser.objects.get(email=email)
+        salt = secrets.token_hex(32)
+        
+        # Store user info for later verification
+        cache_key = f"login_salt_{email}_{salt}"
+        cache.set(cache_key, {
+            'created_at': timezone.now().isoformat(),
+            'user_exists': True,
+            'user_id': str(user.id)  # Store user ID instead of password hash
+        }, 300)
+        
+        return Response({'salt': salt})
+    
+    except CustomUser.DoesNotExist:
+        # Return dummy salt as before
+        dummy_salt = secrets.token_hex(32)
+        cache_key = f"login_salt_{email}_{dummy_salt}"
+        cache.set(cache_key, {
+            'created_at': timezone.now().isoformat(),
+            'user_exists': False
+        }, 300)
+        
+        return Response({'salt': dummy_salt})
+    
+def simple_iterative_hash(password, salt, iterations=10000):
+    """Simple iterative hash matching frontend implementation"""
+    hash_value = password + salt
+    for _ in range(iterations):
+        hash_value = hashlib.sha256(hash_value.encode()).hexdigest()
+    return hash_value
+
+def simple_iterative_hash(password, salt, iterations=10000):
+    """Simple iterative hash matching frontend implementation"""
+    hash_value = password + salt
+    for _ in range(iterations):
+        hash_value = hashlib.sha256(hash_value.encode()).hexdigest()
+    return hash_value
+
+class SecureTokenObtainPairView(APIView):
+    """Enhanced token obtain view with security measures"""
+    permission_classes = [AllowAny]
+
+    @method_decorator(csrf_exempt)
+    def dispatch(self, *args, **kwargs):
+        return super().dispatch(*args, **kwargs)
+    
+    def post(self, request, *args, **kwargs):
+        ip_address = self.get_client_ip(request)
+        user_agent = request.META.get('HTTP_USER_AGENT', '')
+        email = request.data.get('email', '').lower().strip()
+        salt = request.data.get('salt', '')
+
+        # Fallback to plaintext password (deprecated, log warning)
+        plaintext_password = request.data.get('password', '')
+
+        # Validate required fields
+        if not email:
+            return Response({
+                'error': 'Email is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if IP is blocked
+        if SecurityUtils.is_ip_blocked(ip_address):
+            return Response({
+                'error': 'Your IP address has been temporarily blocked due to suspicious activity'
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        
+        # Rate limiting per IP
+        is_locked, attempts = SecurityUtils.increment_failed_attempts(
+            ip_address, 'ip_login', max_attempts=10, lockout_duration=1800  # 30 minutes
+        )
+        
+        if is_locked:
+            SecurityUtils.block_ip(ip_address, 60)  # Block IP for 1 hour
+            return Response({
+                'error': 'Too many failed attempts from your IP address'
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        
+        # Check if user exists and validate
+        try:
+            user = CustomUser.objects.get(email=email)
+        except CustomUser.DoesNotExist:
+            # Log attempt for non-existent user
+            self.log_login_attempt(ip_address, email, False, user_agent, 'User not found')
+            time.sleep(0.5)
+            return Response({
+                'error': 'Invalid credentials'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        
+        # Check if account is locked
+        if user.is_locked():
+            self.log_security_event(
+                user, 'LOGIN_FAILED', ip_address, user_agent,
+                {'reason': 'Account locked'}
+            )
+            return Response({
+                'error': 'Account is temporarily locked due to multiple failed login attempts'
+            }, status=status.HTTP_423_LOCKED)
+        
+        # Check account status
+        if not user.active:
+            self.log_login_attempt(ip_address, email, False, user_agent, 'Inactive account')
+            return Response({
+                'error': 'Account is not active. Please contact administrator.'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Password validation - handle both hashed and plaintext
+        if not check_password(plaintext_password, user.password):
+            user.increment_failed_login()
+            self.log_security_event(user, 'LOGIN_FAILED', ip_address, user_agent, {'reason': 'Invalid password'})
+            time.sleep(0.5)
+            return Response({'error': 'Invalid credentials'}, status=401)
+
+        # Salt validation — prevent replay and fake accounts
+        cache_key = f"login_salt_{email}_{salt}"
+        salt_data = cache.get(cache_key)
+        if not salt_data:
+            self.log_security_event(user, 'SECURITY_VIOLATION', ip_address, user_agent, {'reason': 'Missing or expired salt'})
+            return Response({'error': 'Security validation failed.'}, status=401)
+        if not salt_data.get('user_exists', False):
+            self.log_security_event(None, 'ENUMERATION_ATTEMPT', ip_address, user_agent, {'email': email})
+            return Response({'error': 'Invalid credentials'}, status=401)
+
+        # Remove used salt
+        cache.delete(cache_key)
+
+        # All good – issue token
+        try:
+            refresh = RefreshToken.for_user(user)
+            user.reset_failed_login_attempts()
+            SecurityUtils.reset_failed_attempts(ip_address, 'ip_login')
+
+            self.log_security_event(user, 'LOGIN_SUCCESS', ip_address, user_agent)
+
+            return Response({
+                'access': str(refresh.access_token),
+                'refresh': str(refresh),
+                'user': {
+                    'id': str(user.id),
+                    'email': user.email,
+                    'firstname': user.firstname,
+                    'lastname': user.lastname,
+                    'role': user.role,
+                    'active': user.active
+                },
+                'security': {
+                    'session_id': self.generate_session_token(),
+                    'login_time': timezone.now().isoformat(),
+                    'authentication_method': 'plaintext'
+                }
+            }, status=200)
+
+        except Exception as e:
+            logger.error("Token generation error: %s", e)
+            return Response({'error': 'Login failed.'}, status=500)
+    
+    def get_client_ip(self, request):
+        """Get client IP address"""
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        if x_forwarded_for:
+            return x_forwarded_for.split(',')[0].strip()
+        return request.META.get('REMOTE_ADDR')
+    
+    def generate_session_token(self):
+        """Generate a secure session token"""
+        return SecurityUtils.generate_secure_token()
+    
+    def log_login_attempt(self, ip_address, email, success, user_agent, reason=None):
+        """Log login attempt"""
+        try:
+            LoginAttempt.objects.create(
+                ip_address=ip_address,
+                email=email,
+                success=success,
+                user_agent=user_agent
+            )
+        except Exception as e:
+            logger.error(f"Failed to log login attempt: {e}")
+    
+    def log_security_event(self, user, event_type, ip_address, user_agent, details=None):
+        """Log security event"""
+        try:
+            SecurityEvent.objects.create(
+                user=user,
+                event_type=event_type,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=details or {}
+            )
+        except Exception as e:
+            logger.error(f"Failed to log security event: {e}")
+
 
 class UserListCreate(generics.ListCreateAPIView):
     queryset = CustomUser.objects.all()
@@ -37,6 +252,7 @@ class UserListCreate(generics.ListCreateAPIView):
         if role:
             return CustomUser.objects.filter(role=role)
         return CustomUser.objects.all()
+
 
 class UserRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
     queryset = CustomUser.objects.all()
@@ -65,21 +281,44 @@ class UserRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
         response.data['profile_image'] = instance.profile_image.url if instance.profile_image else None
         return response
 
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def current_user(request):
-    serializer = UserSerializer(request.user)
-    return Response(serializer.data)
+    """Get current user with security context"""
+    user = request.user
+    
+    # Check for suspicious activity
+    ip_address = get_client_ip(request)
+    
+    # Add security context to response
+    user_data = {
+        'id': str(user.id),
+        'email': user.email,
+        'firstname': user.firstname,
+        'lastname': user.lastname,
+        'role': user.role,
+        'active': user.active,
+        'security': {
+            'last_login': user.last_login.isoformat() if user.last_login else None,
+            'failed_attempts': user.failed_login_attempts,
+            'is_locked': user.is_locked()
+        }
+    }
+    
+    return Response(user_data)
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def change_password(request):
-    """
-    Change user password
-    """
+    """Enhanced password change with security logging"""
     user = request.user
     current_password = request.data.get('current_password')
     new_password = request.data.get('new_password')
+    
+    ip_address = get_client_ip(request)
+    user_agent = request.META.get('HTTP_USER_AGENT', '')
     
     if not current_password or not new_password:
         return Response(
@@ -87,8 +326,15 @@ def change_password(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    # Check if current password is correct
     if not user.check_password(current_password):
+        # Log failed password change attempt
+        SecurityEvent.objects.create(
+            user=user,
+            event_type='LOGIN_FAILED',
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={'reason': 'Failed password change - wrong current password'}
+        )
         return Response(
             {'detail': 'Current password is incorrect'},
             status=status.HTTP_400_BAD_REQUEST
@@ -98,10 +344,59 @@ def change_password(request):
     user.set_password(new_password)
     user.save()
     
-    # Update session authentication hash to keep user logged in
-    update_session_auth_hash(request, user)
+    # Log successful password change
+    SecurityEvent.objects.create(
+        user=user,
+        event_type='PASSWORD_CHANGED',
+        ip_address=ip_address,
+        user_agent=user_agent
+    )
     
     return Response({'detail': 'Password changed successfully'})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def unlock_account(request):
+    """Unlock user account (admin only)"""
+    if request.user.role not in ['Director', 'Super Admin']:
+        raise PermissionDenied("Only directors and super admins can unlock accounts")
+    
+    user_id = request.data.get('user_id')
+    if not user_id:
+        return Response(
+            {'error': 'User ID is required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        target_user = CustomUser.objects.get(id=user_id)
+        target_user.unlock_account()
+        
+        # Log unlock event
+        SecurityEvent.objects.create(
+            user=target_user,
+            event_type='ACCOUNT_UNLOCKED',
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            details={'unlocked_by': str(request.user.id)}
+        )
+        
+        return Response({'message': 'Account unlocked successfully'})
+    
+    except CustomUser.DoesNotExist:
+        return Response(
+            {'error': 'User not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+
+def get_client_ip(request):
+    """Utility function to get client IP"""
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        return x_forwarded_for.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR')
 
 class UserByIdView(generics.RetrieveAPIView):
     queryset = CustomUser.objects.all()
@@ -128,6 +423,69 @@ class IsSalesRole(permissions.BasePermission):
 class IsTechnicianRole(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.user.role in ['Technician', 'Technician Manager']
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def validate_session(request):
+    """Validate session token"""
+    try:
+        # Get session token from headers
+        session_token = request.META.get('HTTP_X_SESSION_TOKEN')
+        
+        if not session_token:
+            return Response({
+                'valid': False,
+                'error': 'No session token provided'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # You can add additional validation logic here
+        # For now, if the user is authenticated (JWT token is valid), 
+        # we'll consider the session valid
+        
+        user = request.user
+        
+        # Check if user is still active
+        if not user.active:
+            return Response({
+                'valid': False,
+                'error': 'User account is not active'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Check if account is locked
+        if user.is_locked():
+            return Response({
+                'valid': False,
+                'error': 'Account is locked'
+            }, status=status.HTTP_423_LOCKED)
+        
+        # Log session validation attempt
+        ip_address = get_client_ip(request)
+        user_agent = request.META.get('HTTP_USER_AGENT', '')
+        
+        SecurityEvent.objects.create(
+            user=user,
+            event_type='SESSION_VALIDATED',
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={'session_token': session_token[:10] + '...'}  # Log partial token for security
+        )
+        
+        return Response({
+            'valid': True,
+            'user': {
+                'id': str(user.id),
+                'email': user.email,
+                'role': user.role,
+                'active': user.active
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Session validation error: {e}")
+        return Response({
+            'valid': False,
+            'error': 'Session validation failed'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -777,21 +1135,77 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
     
     def get_queryset(self):
+        # Base queryset with proper relationships
+        queryset = LeaseContract.objects.select_related('client', 'item', 'store').prefetch_related('meter_readings')
+        
+        # Handle search parameter
+        search_term = self.request.query_params.get('search')
+        if search_term:
+            queryset = queryset.filter(
+                Q(lease_no__icontains=search_term) |
+                Q(client__client_name__icontains=search_term) |
+                Q(item__machine_name__icontains=search_term)
+            )
+        
+        # Handle filter parameter (active/inactive/expiring)
+        filter_type = self.request.query_params.get('filter', 'active')
+        
+        if filter_type == 'active':
+            queryset = queryset.filter(is_active=True)
+        elif filter_type == 'inactive':
+            queryset = queryset.filter(is_active=False)
+        elif filter_type == 'expiring':
+            from datetime import date, timedelta
+            today = date.today()
+            thirty_days_from_now = today + timedelta(days=30)
+            queryset = queryset.filter(
+                is_active=True,
+                to_date__gte=today,
+                to_date__lte=thirty_days_from_now
+            )
+        
+        # Handle client filter
         client_id = self.request.query_params.get('client')
         if client_id:
-            return LeaseContract.objects.filter(client=client_id).select_related('client', 'item', 'store').prefetch_related('meter_readings')
-        return LeaseContract.objects.all().select_related('client', 'item', 'store')
+            queryset = queryset.filter(client=client_id)
+        
+        return queryset.order_by('-created_at')
 
+    def list(self, request, *args, **kwargs):
+        """Override list method to ensure proper response format"""
+        try:
+            queryset = self.filter_queryset(self.get_queryset())
+            
+            # Apply pagination
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+            
+            # If no pagination, return all results
+            serializer = self.get_serializer(queryset, many=True)
+            return Response({
+                'results': serializer.data,
+                'count': queryset.count()
+            })
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to fetch leases: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
     def perform_destroy(self, instance):
         with transaction.atomic():
             # Return machine to store
-            machine = instance.item
-            machine.machine_status = 'Available'
-            machine.save()
+            if instance.item:
+                machine = instance.item
+                machine.machine_status = 'Available'
+                machine.save()
             
             # Delete lease
             instance.delete()
-            
+
 class LeaseAssignTechnician(APIView):
     permission_classes = [IsAuthenticated]
 

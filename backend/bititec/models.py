@@ -1,5 +1,6 @@
 import os
 import random
+from datetime import timedelta
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.utils.translation import gettext_lazy as _
@@ -31,7 +32,6 @@ class CustomUserManager(BaseUserManager):
 
         return self.create_user(email, password, **extra_fields)
 
-# models.py update to add profile image
 class CustomUser(AbstractUser):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     ROLE_CHOICES = (
@@ -52,6 +52,12 @@ class CustomUser(AbstractUser):
     role = models.CharField(_('role'), max_length=20, choices=ROLE_CHOICES, default='Technician')
     active = models.BooleanField(_('active'), default=False)
     profile_image = models.ImageField(upload_to='profile_images/', null=True, blank=True)
+
+    # Security fields
+    failed_login_attempts = models.IntegerField(default=0)
+    locked_until = models.DateTimeField(null=True, blank=True)
+    last_failed_login = models.DateTimeField(null=True, blank=True)
+    security_token = models.CharField(max_length=255, null=True, blank=True)  # For additional security
     
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['firstname', 'lastname', 'role']
@@ -60,6 +66,49 @@ class CustomUser(AbstractUser):
     
     def __str__(self):
         return self.email
+    
+    def is_locked(self):
+        """Check if account is currently locked"""
+        if self.locked_until and timezone.now() < self.locked_until:
+            return True
+        return False
+    
+    def lock_account(self, duration_minutes=30):
+        """Lock account for specified duration"""
+        self.locked_until = timezone.now() + timedelta(minutes=duration_minutes)
+        self.save(update_fields=['locked_until'])
+    
+    def unlock_account(self):
+        """Unlock account and reset failed attempts"""
+        self.failed_login_attempts = 0
+        self.locked_until = None
+        self.last_failed_login = None
+        self.save(update_fields=['failed_login_attempts', 'locked_until', 'last_failed_login'])
+    
+    def increment_failed_login(self):
+        """Increment failed login attempts and lock if necessary"""
+        self.failed_login_attempts += 1
+        self.last_failed_login = timezone.now()
+        
+        if self.failed_login_attempts >= 3:
+            # Lock for 30 minutes after 3 failed attempts
+            self.lock_account(30)
+        elif self.failed_login_attempts >= 5:
+            # Lock for 1 hour after 5 failed attempts
+            self.lock_account(60)
+        elif self.failed_login_attempts >= 10:
+            # Lock for 24 hours after 10 failed attempts
+            self.lock_account(1440)
+            
+        self.save(update_fields=['failed_login_attempts', 'last_failed_login'])
+    
+    def reset_failed_login_attempts(self):
+        """Reset failed login attempts on successful login"""
+        if self.failed_login_attempts > 0:
+            self.failed_login_attempts = 0
+            self.last_failed_login = None
+            self.save(update_fields=['failed_login_attempts', 'last_failed_login'])
+    
     
     def save(self, *args, **kwargs):
         # Format phone number to Kenya format if provided
@@ -89,6 +138,38 @@ class CustomUser(AbstractUser):
     class Meta:
         verbose_name = _('user')
         verbose_name_plural = _('users')
+
+class LoginAttempt(models.Model):
+    """Track login attempts from different IPs"""
+    ip_address = models.GenericIPAddressField()
+    email = models.EmailField(null=True, blank=True)
+    success = models.BooleanField(default=False)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    user_agent = models.TextField(blank=True)
+    
+    class Meta:
+        ordering = ['-timestamp']
+
+class SecurityEvent(models.Model):
+    """Log security events"""
+    EVENT_TYPES = [
+        ('LOGIN_SUCCESS', 'Login Success'),
+        ('LOGIN_FAILED', 'Login Failed'),
+        ('ACCOUNT_LOCKED', 'Account Locked'),
+        ('SUSPICIOUS_ACTIVITY', 'Suspicious Activity'),
+        ('PASSWORD_CHANGED', 'Password Changed'),
+        ('MULTIPLE_FAILED_ATTEMPTS', 'Multiple Failed Attempts'),
+    ]
+    
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, null=True, blank=True)
+    event_type = models.CharField(max_length=50, choices=EVENT_TYPES)
+    ip_address = models.GenericIPAddressField()
+    user_agent = models.TextField(blank=True)
+    details = models.JSONField(default=dict)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-timestamp']
 
 class Store(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

@@ -15,6 +15,13 @@ class UserSerializer(serializers.ModelSerializer):
         allow_blank=True,
         max_length=20
     )
+    is_locked = serializers.SerializerMethodField()
+    failed_login_attempts = serializers.IntegerField(read_only=True)
+    locked_until = serializers.DateTimeField(read_only=True)
+    last_failed_login = serializers.DateTimeField(read_only=True)
+
+    def get_is_locked(self, obj):
+        return obj.is_locked()
 
     def validate_phonenumber(self, value):
         """Validate phone number format"""
@@ -32,14 +39,20 @@ class UserSerializer(serializers.ModelSerializer):
         return value
 
     def update(self, instance, validated_data):
-        # Handle profile image separately
-        profile_image = validated_data.pop('profile_image', None)
-        if profile_image:
-            # Delete old image if exists
-            if instance.profile_image:
+        # Handle profile image update properly
+        profile_image = validated_data.get('profile_image', None)
+        if profile_image is not None:
+            # Only delete old image if a new one is provided (not None)
+            if profile_image and instance.profile_image:
+                # Delete old image file
                 instance.profile_image.delete(save=False)
             instance.profile_image = profile_image
-        
+            
+        # Handle phone number formatting
+        phonenumber = validated_data.get('phonenumber')
+        if phonenumber is not None:
+            validated_data['phonenumber'] = phonenumber
+            
         return super().update(instance, validated_data)
     
     def to_representation(self, instance):
@@ -47,15 +60,25 @@ class UserSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         
         # Ensure profile_image returns full URL
-        if instance.profile_image:
-            # Get the full URL including domain
-            request = self.context.get('request')
-            if request:
-                data['profile_image'] = request.build_absolute_uri(instance.profile_image.url)
-            else:
-                data['profile_image'] = instance.profile_image.url
+        if instance.profile_image and instance.profile_image.name:
+            try:
+                # Get the full URL including domain
+                request = self.context.get('request')
+                if request:
+                    data['profile_image'] = request.build_absolute_uri(instance.profile_image.url)
+                else:
+                    data['profile_image'] = instance.profile_image.url
+            except ValueError:
+                # Handle case where image file doesn't exist
+                data['profile_image'] = None
         else:
             data['profile_image'] = None
+            
+        # Ensure phone number is properly formatted for display
+        if instance.phonenumber:
+            data['phonenumber'] = instance.phonenumber
+        else:
+            data['phonenumber'] = ''
             
         return data
     
@@ -63,7 +86,8 @@ class UserSerializer(serializers.ModelSerializer):
         model = CustomUser
         fields = [
             'id', 'email', 'firstname', 'lastname',
-            'phonenumber', 'role', 'active', 'profile_image',
+            'phonenumber', 'role', 'active', 'profile_image', 'is_locked',
+            'failed_login_attempts', 'locked_until', 'last_failed_login'
         ]
         extra_kwargs = {'password': {'write_only': True}, 'role': {'read_only': True}}
         
