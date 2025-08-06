@@ -1,6 +1,6 @@
 const express = require('express');
 require('dotenv').config();
-const sgMail = require('@sendgrid/mail');
+const nodemailer = require('nodemailer');
 const cors = require('cors');
 const app = express();
 const port = 5000;
@@ -18,12 +18,29 @@ const logger = createLogger({
   ]
 });
 
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+// Create nodemailer transporter for cPanel email
+const createTransporter = () => {
+  const port = parseInt(process.env.CPANEL_SMTP_PORT) || 465;
+  const config = {
+    host: process.env.CPANEL_SMTP_HOST,
+    port: port,
+    secure: port === 465, // true for 465 (SSL), false for 587 (TLS)
+    auth: {
+      user: process.env.CPANEL_EMAIL_USER,
+      pass: process.env.CPANEL_EMAIL_PASS,
+    },
+    tls: {
+      rejectUnauthorized: false
+    }
+  };
+  
+  return nodemailer.createTransport(config);
+};
 
 app.use(cors({
   origin: [
     'http://localhost:3000',
-    'http://192.168.1.49:8081', // Your Expo Go URL
+    'http://192.168.1.49:8081',
     'exp://192.168.1.49:8081',
     'https://bititecsystem.web.app'  
   ],
@@ -44,32 +61,30 @@ app.post('/send-email', async (req, res) => {
       });
     }
     
-    const msg = {
+    const transporter = createTransporter();
+    
+    const mailOptions = {
+      from: `"Bititec Systems" <${process.env.CPANEL_EMAIL_USER}>`,
       to: email,
-      from: 'noreply@bititecsystems.com', 
       subject: subject || 'Message from Bititec Systems',
       text: body,
       html: `<p>${body}</p>`,
     };
     
-    await sgMail.send(msg);
+    await transporter.sendMail(mailOptions);
     res.json({ success: true });
   } catch (error) {
-    logger.error(...args);
-    
-    if (error.response) {
-      logger.error(...args);
-    }
+    logger.error('Email send error:', error);
     
     res.status(500).json({
       success: false,
       error: error.message,
-      details: error.response?.body?.errors || null
+      details: error.code || null
     });
   }
 });
 
-// New endpoint for sending service call links
+// Service call endpoint with cPanel SMTP
 app.post('/send-service-call', async (req, res) => {
   try {
     const { email, serviceCallId, tokenId, serviceCallInfo, expirationTime } = req.body;
@@ -81,16 +96,11 @@ app.post('/send-service-call', async (req, res) => {
       });
     }
     
-    // Format the expiration time - convert to user-friendly format
     const expiresAt = expirationTime ? new Date(expirationTime).toLocaleString() : '1 hour from now';
-    
-    // Format ticket number and client name for subject line
     const ticketNo = serviceCallInfo.ticket_no || 'Unknown Ticket';
     const clientName = serviceCallInfo.client?.client_name || serviceCallInfo.client_name ||'Unknown Client';
     const clientLocation = serviceCallInfo.client?.client_location|| serviceCallInfo.client_location ||'Unknown Client';
     
-    // Generate the access link
-    // Frontend URL should match your React app URL
     const baseUrl = process.env.FRONTEND_URL || 'https://bititecsystem.web.app';
     const serviceCallLink = `${baseUrl}/customer-service-call/${serviceCallId}?token=${tokenId}`;
     
@@ -142,32 +152,30 @@ app.post('/send-service-call', async (req, res) => {
       Bititec Systems Team
     `;
     
-    const msg = {
+    const transporter = createTransporter();
+    
+    const mailOptions = {
+      from: `"Bititec Systems" <${process.env.CPANEL_EMAIL_USER}>`,
       to: email,
-      from: 'noreply@bititecsystems.com',
       subject: subject,
       text: textBody,
       html: htmlBody,
     };
     
-    await sgMail.send(msg);
+    await transporter.sendMail(mailOptions);
     res.json({ success: true });
   } catch (error) {
-    logger.error(error.message, { error });
-    
-    if (error.response) {
-      logger.error(error.message, { error });
-    }
+    logger.error('Service call email error:', error);
     
     res.status(500).json({
       success: false,
       error: error.message,
-      details: error.response?.body?.errors || null
+      details: error.code || null
     });
   }
 });
 
-// New endpoint for sending sales quotations
+// Quotation endpoint with cPanel SMTP
 app.post('/send-quotation', async (req, res) => {
   try {
     const { email, quotationData } = req.body;
@@ -190,7 +198,6 @@ app.post('/send-quotation', async (req, res) => {
     
     const subject = `Sales Quotation - ${quotation_no || 'New Quotation'}`;
     
-    // Format items for email display
     const itemsList = items.map(item => {
       const unitPrice = item.unit_price ? Number(item.unit_price) : 0;
       const totalPrice = item.total_price ? Number(item.total_price) : 0;
@@ -284,27 +291,25 @@ app.post('/send-quotation', async (req, res) => {
       Email: sales@bititecsystems.com
     `;
     
-    const msg = {
+    const transporter = createTransporter();
+    
+    const mailOptions = {
+      from: `"Bititec Systems Sales" <sales@bititecsystems.com>`,
       to: email,
-      from: 'sales@bititecsystems.com',
       subject: subject,
       text: textBody,
       html: htmlBody,
     };
     
-    await sgMail.send(msg);
+    await transporter.sendMail(mailOptions);
     res.json({ success: true });
   } catch (error) {
     logger.error('Quotation email send error:', error);
     
-    if (error.response) {
-      logger.error('SendGrid error response:', error.response.body);
-    }
-    
     res.status(500).json({
       success: false,
       error: error.message,
-      details: error.response?.body?.errors || null
+      details: error.code || null
     });
   }
 });
