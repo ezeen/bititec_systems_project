@@ -111,22 +111,22 @@ class SecureTokenObtainPairView(APIView):
                 'error': 'Email is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Check if IP is blocked
-        if SecurityUtils.is_ip_blocked(ip_address):
-            return Response({
-                'error': 'Your IP address has been temporarily blocked due to suspicious activity'
-            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        # DISABLED: IP blocking check
+        # if SecurityUtils.is_ip_blocked(ip_address):
+        #     return Response({
+        #         'error': 'Your IP address has been temporarily blocked due to suspicious activity'
+        #     }, status=status.HTTP_429_TOO_MANY_REQUESTS)
         
-        # Rate limiting per IP
-        is_locked, attempts = SecurityUtils.increment_failed_attempts(
-            ip_address, 'ip_login', max_attempts=10, lockout_duration=1800  # 30 minutes
-        )
+        # DISABLED: Rate limiting per IP
+        # is_locked, attempts = SecurityUtils.increment_failed_attempts(
+        #     ip_address, 'ip_login', max_attempts=10, lockout_duration=1800  # 30 minutes
+        # )
         
-        if is_locked:
-            SecurityUtils.block_ip(ip_address, 60)  # Block IP for 1 hour
-            return Response({
-                'error': 'Too many failed attempts from your IP address'
-            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        # if is_locked:
+        #     SecurityUtils.block_ip(ip_address, 60)  # Block IP for 1 hour
+        #     return Response({
+        #         'error': 'Too many failed attempts from your IP address'
+        #     }, status=status.HTTP_429_TOO_MANY_REQUESTS)
         
         # Check if user exists and validate
         try:
@@ -163,24 +163,24 @@ class SecureTokenObtainPairView(APIView):
             time.sleep(0.5)
             return Response({'error': 'Invalid credentials'}, status=401)
 
-        # Salt validation — prevent replay and fake accounts
-        cache_key = f"login_salt_{email}_{salt}"
-        salt_data = cache.get(cache_key)
-        if not salt_data:
-            self.log_security_event(user, 'SECURITY_VIOLATION', ip_address, user_agent, {'reason': 'Missing or expired salt'})
-            return Response({'error': 'Security validation failed.'}, status=401)
-        if not salt_data.get('user_exists', False):
-            self.log_security_event(None, 'ENUMERATION_ATTEMPT', ip_address, user_agent, {'email': email})
-            return Response({'error': 'Invalid credentials'}, status=401)
+        # DISABLED: Salt validation — prevent replay and fake accounts
+        # cache_key = f"login_salt_{email}_{salt}"
+        # salt_data = cache.get(cache_key)
+        # if not salt_data:
+        #     self.log_security_event(user, 'SECURITY_VIOLATION', ip_address, user_agent, {'reason': 'Missing or expired salt'})
+        #     return Response({'error': 'Security validation failed.'}, status=401)
+        # if not salt_data.get('user_exists', False):
+        #     self.log_security_event(None, 'ENUMERATION_ATTEMPT', ip_address, user_agent, {'email': email})
+        #     return Response({'error': 'Invalid credentials'}, status=401)
 
-        # Remove used salt
-        cache.delete(cache_key)
+        # DISABLED: Remove used salt
+        # cache.delete(cache_key)
 
         # All good – issue token
         try:
             refresh = RefreshToken.for_user(user)
-            user.reset_failed_login_attempts()
-            SecurityUtils.reset_failed_attempts(ip_address, 'ip_login')
+            # user.reset_failed_login_attempts()
+            # SecurityUtils.reset_failed_attempts(ip_address, 'ip_login')
 
             self.log_security_event(user, 'LOGIN_SUCCESS', ip_address, user_agent)
 
