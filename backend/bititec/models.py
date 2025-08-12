@@ -1,5 +1,6 @@
 import os
 import random
+from datetime import timedelta
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.utils.translation import gettext_lazy as _
@@ -31,7 +32,6 @@ class CustomUserManager(BaseUserManager):
 
         return self.create_user(email, password, **extra_fields)
 
-# models.py update to add profile image
 class CustomUser(AbstractUser):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     ROLE_CHOICES = (
@@ -52,6 +52,12 @@ class CustomUser(AbstractUser):
     role = models.CharField(_('role'), max_length=20, choices=ROLE_CHOICES, default='Technician')
     active = models.BooleanField(_('active'), default=False)
     profile_image = models.ImageField(upload_to='profile_images/', null=True, blank=True)
+
+    # Security fields
+    failed_login_attempts = models.IntegerField(default=0)
+    locked_until = models.DateTimeField(null=True, blank=True)
+    last_failed_login = models.DateTimeField(null=True, blank=True)
+    security_token = models.CharField(max_length=255, null=True, blank=True)  # For additional security
     
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['firstname', 'lastname', 'role']
@@ -60,6 +66,49 @@ class CustomUser(AbstractUser):
     
     def __str__(self):
         return self.email
+    
+    def is_locked(self):
+        """Check if account is currently locked"""
+        if self.locked_until and timezone.now() < self.locked_until:
+            return True
+        return False
+    
+    def lock_account(self, duration_minutes=30):
+        """Lock account for specified duration"""
+        self.locked_until = timezone.now() + timedelta(minutes=duration_minutes)
+        self.save(update_fields=['locked_until'])
+    
+    def unlock_account(self):
+        """Unlock account and reset failed attempts"""
+        self.failed_login_attempts = 0
+        self.locked_until = None
+        self.last_failed_login = None
+        self.save(update_fields=['failed_login_attempts', 'locked_until', 'last_failed_login'])
+    
+    def increment_failed_login(self):
+        """Increment failed login attempts and lock if necessary"""
+        self.failed_login_attempts += 1
+        self.last_failed_login = timezone.now()
+        
+        if self.failed_login_attempts >= 3:
+            # Lock for 30 minutes after 3 failed attempts
+            self.lock_account(30)
+        elif self.failed_login_attempts >= 5:
+            # Lock for 1 hour after 5 failed attempts
+            self.lock_account(60)
+        elif self.failed_login_attempts >= 10:
+            # Lock for 24 hours after 10 failed attempts
+            self.lock_account(1440)
+            
+        self.save(update_fields=['failed_login_attempts', 'last_failed_login'])
+    
+    def reset_failed_login_attempts(self):
+        """Reset failed login attempts on successful login"""
+        if self.failed_login_attempts > 0:
+            self.failed_login_attempts = 0
+            self.last_failed_login = None
+            self.save(update_fields=['failed_login_attempts', 'last_failed_login'])
+    
     
     def save(self, *args, **kwargs):
         # Format phone number to Kenya format if provided
@@ -89,6 +138,38 @@ class CustomUser(AbstractUser):
     class Meta:
         verbose_name = _('user')
         verbose_name_plural = _('users')
+
+class LoginAttempt(models.Model):
+    """Track login attempts from different IPs"""
+    ip_address = models.GenericIPAddressField()
+    email = models.EmailField(null=True, blank=True)
+    success = models.BooleanField(default=False)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    user_agent = models.TextField(blank=True)
+    
+    class Meta:
+        ordering = ['-timestamp']
+
+class SecurityEvent(models.Model):
+    """Log security events"""
+    EVENT_TYPES = [
+        ('LOGIN_SUCCESS', 'Login Success'),
+        ('LOGIN_FAILED', 'Login Failed'),
+        ('ACCOUNT_LOCKED', 'Account Locked'),
+        ('SUSPICIOUS_ACTIVITY', 'Suspicious Activity'),
+        ('PASSWORD_CHANGED', 'Password Changed'),
+        ('MULTIPLE_FAILED_ATTEMPTS', 'Multiple Failed Attempts'),
+    ]
+    
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, null=True, blank=True)
+    event_type = models.CharField(max_length=50, choices=EVENT_TYPES)
+    ip_address = models.GenericIPAddressField()
+    user_agent = models.TextField(blank=True)
+    details = models.JSONField(default=dict)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-timestamp']
 
 class Store(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -223,6 +304,7 @@ class Machine(models.Model):
     supplier_name = models.CharField(max_length=255)
     machine_status = models.CharField(max_length=20, choices=MACHINE_STATUS_CHOICES)
     is_transfer = models.BooleanField(default=False)
+    source_transfer = models.ForeignKey('Transfer', on_delete=models.SET_NULL, null=True, blank=True, related_name='transferred_machines')
 
     def __str__(self):
         return f"{self.machine_name} - {self.serial_no}"
@@ -268,6 +350,7 @@ class Part(models.Model):
     supplier_name = models.CharField(max_length=255)
     part_status = models.CharField(max_length=20, choices=PART_STATUS_CHOICES)
     is_transfer = models.BooleanField(default=False)
+    source_transfer = models.ForeignKey('Transfer', on_delete=models.SET_NULL, null=True, blank=True, related_name='transferred_parts')
 
     def __str__(self):
         return f"{self.part_name} - {self.ref_no}"
@@ -293,6 +376,95 @@ class Part(models.Model):
     def available_quantity(self):
         """Get the quantity available"""
         return self.intial_quantity - self.leased_quantity() - self.sold_quantity()
+    
+    @property
+    def transferred_quantity(self):
+        """Calculate total quantity transferred out from this part"""
+        return TransferItem.objects.filter(
+            part=self,
+            transfer__status='Completed',
+            transfer__from_store=self.store
+        ).aggregate(
+            total=models.Sum('quantity')
+        )['total'] or 0
+    
+    @property
+    def received_quantity(self):
+        """Calculate total quantity received through transfers"""
+        return TransferItem.objects.filter(
+            part__ref_no__startswith=self.ref_no.split('-TR-')[0],  # Original ref_no before transfer
+            transfer__status='Completed',
+            transfer__to_store=self.store
+        ).aggregate(
+            total=models.Sum('quantity')
+        )['total'] or 0
+    
+    @property
+    def transfer_history(self):
+        """Get all transfers involving this part"""
+        from django.db.models import Q
+        
+        # Get transfers where this part was transferred out
+        outgoing = TransferItem.objects.filter(
+            part=self,
+            transfer__from_store=self.store
+        ).select_related('transfer', 'transfer__from_store', 'transfer__to_store')
+        
+        # Get transfers where similar parts were transferred in (based on ref_no pattern)
+        incoming = TransferItem.objects.filter(
+            part__ref_no__startswith=self.ref_no.split('-TR-')[0],
+            transfer__to_store=self.store
+        ).select_related('transfer', 'transfer__from_store', 'transfer__to_store')
+        
+        history = []
+        
+        for item in outgoing:
+            history.append({
+                'id': f"out_{item.id}",
+                'transfer': {
+                    'id': str(item.transfer.id),
+                    'from_store': {
+                        'id': str(item.transfer.from_store.id),
+                        'store_name': item.transfer.from_store.store_name
+                    },
+                    'to_store': {
+                        'id': str(item.transfer.to_store.id),
+                        'store_name': item.transfer.to_store.store_name
+                    },
+                    'created_at': item.transfer.created_at.isoformat(),
+                    'status': item.transfer.status,
+                    'notes': item.transfer.notes
+                },
+                'quantity': item.quantity,
+                'transfer_type': 'outgoing',
+                'status': item.transfer.status
+            })
+            
+        for item in incoming:
+            history.append({
+                'id': f"in_{item.id}",
+                'transfer': {
+                    'id': str(item.transfer.id),
+                    'from_store': {
+                        'id': str(item.transfer.from_store.id),
+                        'store_name': item.transfer.from_store.store_name
+                    },
+                    'to_store': {
+                        'id': str(item.transfer.to_store.id),
+                        'store_name': item.transfer.to_store.store_name
+                    },
+                    'created_at': item.transfer.created_at.isoformat(),
+                    'status': item.transfer.status,
+                    'notes': item.transfer.notes
+                },
+                'quantity': item.quantity,
+                'transfer_type': 'incoming',
+                'status': item.transfer.status
+            })
+        
+        # Sort by created_at date
+        history.sort(key=lambda x: x['transfer']['created_at'], reverse=True)
+        return history
 
     class Meta:
         ordering = ['-created_at']
@@ -319,7 +491,7 @@ class Accessory(models.Model):
     unit_value = models.PositiveIntegerField()
     intial_quantity = models.PositiveIntegerField()
     quantity = models.PositiveIntegerField()
-    conditon_description = models.JSONField(default=list)
+    condition_description = models.JSONField(default=list)
     created_at = models.DateTimeField(default=timezone.now)
     acc_condition = models.CharField(max_length=20, choices=ACCESSORY_CONDITION_CHOICES)
     color_type = models.CharField(max_length=100)
@@ -327,6 +499,7 @@ class Accessory(models.Model):
     supplier_name = models.CharField(max_length=255)
     acc_status = models.CharField(max_length=20, choices=ACCESSORY_STATUS_CHOICES)
     is_transfer = models.BooleanField(default=False)
+    source_transfer = models.ForeignKey('Transfer', on_delete=models.SET_NULL, null=True, blank=True, related_name='transferred_accessories')
 
     def __str__(self):
         return f"{self.acc_name} - {self.ref_no}"
@@ -352,6 +525,95 @@ class Accessory(models.Model):
     def available_quantity(self):
         """Get the quantity available"""
         return self.intial_quantity - self.leased_quantity() - self.sold_quantity()
+    
+    @property
+    def transferred_quantity(self):
+        """Calculate total quantity transferred out from this accessory"""
+        return TransferItem.objects.filter(
+            accessory=self,
+            transfer__status='Completed',
+            transfer__from_store=self.store
+        ).aggregate(
+            total=models.Sum('quantity')
+        )['total'] or 0
+    
+    @property
+    def received_quantity(self):
+        """Calculate total quantity received through transfers"""
+        return TransferItem.objects.filter(
+            accessory__ref_no__startswith=self.ref_no.split('-TR-')[0],  # Original ref_no before transfer
+            transfer__status='Completed',
+            transfer__to_store=self.store
+        ).aggregate(
+            total=models.Sum('quantity')
+        )['total'] or 0
+    
+    @property
+    def transfer_history(self):
+        """Get all transfers involving this accessory"""
+        from django.db.models import Q
+        
+        # Get transfers where this accessory was transferred out
+        outgoing = TransferItem.objects.filter(
+            accessory=self,
+            transfer__from_store=self.store
+        ).select_related('transfer', 'transfer__from_store', 'transfer__to_store')
+        
+        # Get transfers where similar accessories were transferred in (based on ref_no pattern)
+        incoming = TransferItem.objects.filter(
+            accessory__ref_no__startswith=self.ref_no.split('-TR-')[0],
+            transfer__to_store=self.store
+        ).select_related('transfer', 'transfer__from_store', 'transfer__to_store')
+        
+        history = []
+        
+        for item in outgoing:
+            history.append({
+                'id': f"out_{item.id}",
+                'transfer': {
+                    'id': str(item.transfer.id),
+                    'from_store': {
+                        'id': str(item.transfer.from_store.id),
+                        'store_name': item.transfer.from_store.store_name
+                    },
+                    'to_store': {
+                        'id': str(item.transfer.to_store.id),
+                        'store_name': item.transfer.to_store.store_name
+                    },
+                    'created_at': item.transfer.created_at.isoformat(),
+                    'status': item.transfer.status,
+                    'notes': item.transfer.notes
+                },
+                'quantity': item.quantity,
+                'transfer_type': 'outgoing',
+                'status': item.transfer.status
+            })
+            
+        for item in incoming:
+            history.append({
+                'id': f"in_{item.id}",
+                'transfer': {
+                    'id': str(item.transfer.id),
+                    'from_store': {
+                        'id': str(item.transfer.from_store.id),
+                        'store_name': item.transfer.from_store.store_name
+                    },
+                    'to_store': {
+                        'id': str(item.transfer.to_store.id),
+                        'store_name': item.transfer.to_store.store_name
+                    },
+                    'created_at': item.transfer.created_at.isoformat(),
+                    'status': item.transfer.status,
+                    'notes': item.transfer.notes
+                },
+                'quantity': item.quantity,
+                'transfer_type': 'incoming',
+                'status': item.transfer.status
+            })
+        
+        # Sort by created_at date
+        history.sort(key=lambda x: x['transfer']['created_at'], reverse=True)
+        return history
 
     class Meta:
         ordering = ['-created_at']
@@ -372,7 +634,8 @@ class Call(models.Model):
         ('Open', 'Open'),
         ('Pending', 'Pending'),
         ('In Progress', 'In Progress'),
-        ('Complete', 'Complete'),
+        ('Completed', 'Completed'),  
+        ('Closed', 'Closed'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -383,10 +646,10 @@ class Call(models.Model):
     reported_date = models.DateTimeField(default=timezone.now)
     item = models.ForeignKey(Machine, on_delete=models.PROTECT, null=True, blank=True)
     fault_reported = models.TextField()
-    action_taken = models.JSONField(default=list)
+    action_taken = models.TextField(blank=True, default='')
     meter_reading = models.PositiveIntegerField(default=0)
-    parts_required = models.JSONField(default=list)
-    parts_used = models.JSONField(default=list)
+    parts_required = models.TextField(blank=True, default='')  
+    parts_used = models.TextField(blank=True, default='')
     comments = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Open')
     department = models.CharField(max_length=100)
@@ -404,6 +667,8 @@ class Call(models.Model):
     walk_in_machine_name = models.CharField(max_length=255, blank=True)
     walk_in_machine_type = models.CharField(max_length=255, blank=True)
     walk_in_serial_no = models.CharField(max_length=255, blank=True)
+    start_time = models.DateTimeField(null=True, blank=True)  
+    finish_time = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         if self.client:
@@ -413,18 +678,22 @@ class Call(models.Model):
 
     def check_and_update_status(self):
         """
-        Check if both approvals are True and update status to Complete if needed
+        Updated status logic
         """
         if self.client_verification and self.technician_manager_approval:
-            self.status = 'Complete'
-    
+            self.status = 'Closed'
+        # Only update status if it's not already in progress/completed
+        elif self.status not in ['In Progress', 'Completed']:
+            if self.technician.exists():
+                self.status = 'Pending'
+            else:
+                self.status = 'Open'
+
     def save(self, *args, **kwargs):
         if not self.ticket_no:
             self.ticket_no = self.generate_ticket_number()
         
-        # Check and update status before saving
         self.check_and_update_status()
-        
         super().save(*args, **kwargs)
 
     def generate_ticket_number(self):
@@ -501,6 +770,7 @@ class LeaseContract(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     store = models.ForeignKey(Store, on_delete=models.PROTECT)
+    technician = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_leases', limit_choices_to={'role__in': ['Technician', 'Technician Manager']})
 
     def __str__(self):
         return f"{self.lease_no} - {self.client.client_name}"
@@ -819,4 +1089,37 @@ class QuotationItem(models.Model):
     def save(self, *args, **kwargs):
         self.total_price = self.quantity * self.unit_price
         super().save(*args, **kwargs)
+
+
+class Transfer(models.Model):
+    STATUS_CHOICES = [
+        ('Pending', 'Pending'),
+        ('Completed', 'Completed'),
+        ('Cancelled', 'Cancelled'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    from_store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name='outgoing_transfers')
+    to_store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name='incoming_transfers')
+    created_by = models.ForeignKey(CustomUser, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
+    notes = models.TextField(blank=True, null=True)
+
+class TransferItem(models.Model):
+    ITEM_TYPE_CHOICES = [
+        ('Machine', 'Machine'),
+        ('Part', 'Part'),
+        ('Accessory', 'Accessory'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    transfer = models.ForeignKey(Transfer, on_delete=models.CASCADE, related_name='items')
+    item_type = models.CharField(max_length=20, choices=ITEM_TYPE_CHOICES)
+    machine = models.ForeignKey(Machine, on_delete=models.CASCADE, null=True, blank=True)
+    part = models.ForeignKey(Part, on_delete=models.CASCADE, null=True, blank=True)
+    accessory = models.ForeignKey(Accessory, on_delete=models.CASCADE, null=True, blank=True)
+    quantity = models.PositiveIntegerField(default=1)
+    initial_quantity = models.PositiveIntegerField(default=0)  # Original quantity at transfer time
 

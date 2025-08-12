@@ -14,5 +14,5 @@ python-dotenv
 gunicorn
 python-dateutil
 Pillow
-xhtml2pdf
-
+xhtml2pd
+django-csp

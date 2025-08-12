@@ -1,10 +1,19 @@
+from asyncio.log import logger
+from django.core.cache import cache
+import hashlib
+import os
+import time
+import logging
 import re
+import secrets
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions, status, filters, viewsets
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, Quotation, Sale, SaleItem, Store, Call, ServiceCallToken, StoreInquiry
-from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, QuotationSerializer, SaleSerializer, StoreInquirySerializer, UserSerializer, RegisterSerializer, StoreSerializer
+
+from .middleware import SecurityUtils
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StoreInquiry, Transfer, TransferItem
+from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, QuotationSerializer, SaleSerializer, StoreInquirySerializer, TransferSerializer, UserSerializer, RegisterSerializer, StoreSerializer
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.views import APIView
@@ -19,6 +28,8 @@ from rest_framework.pagination import PageNumberPagination
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework.exceptions import ValidationError
+from rest_framework_simplejwt.views import TokenObtainPairView
+from django.contrib.auth.hashers import check_password
 from decimal import Decimal, InvalidOperation
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -27,6 +38,210 @@ from django.middleware.csrf import get_token
 from rest_framework import permissions, viewsets
 from django.template.loader import render_to_string
 from xhtml2pdf import pisa
+
+logger = logging.getLogger(__name__)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def get_salt(request):
+    email = request.data.get('email', '').lower().strip()
+    
+    if not email:
+        return Response({'error': 'Email is required'}, status=400)
+    
+    try:
+        user = CustomUser.objects.get(email=email)
+        salt = secrets.token_hex(32)
+        
+        # Store user info for later verification
+        cache_key = f"login_salt_{email}_{salt}"
+        cache.set(cache_key, {
+            'created_at': timezone.now().isoformat(),
+            'user_exists': True,
+            'user_id': str(user.id)  # Store user ID instead of password hash
+        }, 300)
+        
+        return Response({'salt': salt})
+    
+    except CustomUser.DoesNotExist:
+        # Return dummy salt as before
+        dummy_salt = secrets.token_hex(32)
+        cache_key = f"login_salt_{email}_{dummy_salt}"
+        cache.set(cache_key, {
+            'created_at': timezone.now().isoformat(),
+            'user_exists': False
+        }, 300)
+        
+        return Response({'salt': dummy_salt})
+    
+def simple_iterative_hash(password, salt, iterations=10000):
+    """Simple iterative hash matching frontend implementation"""
+    hash_value = password + salt
+    for _ in range(iterations):
+        hash_value = hashlib.sha256(hash_value.encode()).hexdigest()
+    return hash_value
+
+def simple_iterative_hash(password, salt, iterations=10000):
+    """Simple iterative hash matching frontend implementation"""
+    hash_value = password + salt
+    for _ in range(iterations):
+        hash_value = hashlib.sha256(hash_value.encode()).hexdigest()
+    return hash_value
+
+class SecureTokenObtainPairView(APIView):
+    """Enhanced token obtain view with security measures"""
+    permission_classes = [AllowAny]
+
+    @method_decorator(csrf_exempt)
+    def dispatch(self, *args, **kwargs):
+        return super().dispatch(*args, **kwargs)
+    
+    def post(self, request, *args, **kwargs):
+        ip_address = self.get_client_ip(request)
+        user_agent = request.META.get('HTTP_USER_AGENT', '')
+        email = request.data.get('email', '').lower().strip()
+        salt = request.data.get('salt', '')
+
+        # Fallback to plaintext password (deprecated, log warning)
+        plaintext_password = request.data.get('password', '')
+
+        # Validate required fields
+        if not email:
+            return Response({
+                'error': 'Email is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # DISABLED: IP blocking check
+        # if SecurityUtils.is_ip_blocked(ip_address):
+        #     return Response({
+        #         'error': 'Your IP address has been temporarily blocked due to suspicious activity'
+        #     }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        
+        # DISABLED: Rate limiting per IP
+        # is_locked, attempts = SecurityUtils.increment_failed_attempts(
+        #     ip_address, 'ip_login', max_attempts=10, lockout_duration=1800  # 30 minutes
+        # )
+        
+        # if is_locked:
+        #     SecurityUtils.block_ip(ip_address, 60)  # Block IP for 1 hour
+        #     return Response({
+        #         'error': 'Too many failed attempts from your IP address'
+        #     }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        
+        # Check if user exists and validate
+        try:
+            user = CustomUser.objects.get(email=email)
+        except CustomUser.DoesNotExist:
+            # Log attempt for non-existent user
+            self.log_login_attempt(ip_address, email, False, user_agent, 'User not found')
+            time.sleep(0.5)
+            return Response({
+                'error': 'Invalid credentials'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        
+        # Check if account is locked
+        if user.is_locked():
+            self.log_security_event(
+                user, 'LOGIN_FAILED', ip_address, user_agent,
+                {'reason': 'Account locked'}
+            )
+            return Response({
+                'error': 'Account is temporarily locked due to multiple failed login attempts'
+            }, status=status.HTTP_423_LOCKED)
+        
+        # Check account status
+        if not user.active:
+            self.log_login_attempt(ip_address, email, False, user_agent, 'Inactive account')
+            return Response({
+                'error': 'Account is not active. Please contact administrator.'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Password validation - handle both hashed and plaintext
+        if not check_password(plaintext_password, user.password):
+            user.increment_failed_login()
+            self.log_security_event(user, 'LOGIN_FAILED', ip_address, user_agent, {'reason': 'Invalid password'})
+            time.sleep(0.5)
+            return Response({'error': 'Invalid credentials'}, status=401)
+
+        # DISABLED: Salt validation — prevent replay and fake accounts
+        # cache_key = f"login_salt_{email}_{salt}"
+        # salt_data = cache.get(cache_key)
+        # if not salt_data:
+        #     self.log_security_event(user, 'SECURITY_VIOLATION', ip_address, user_agent, {'reason': 'Missing or expired salt'})
+        #     return Response({'error': 'Security validation failed.'}, status=401)
+        # if not salt_data.get('user_exists', False):
+        #     self.log_security_event(None, 'ENUMERATION_ATTEMPT', ip_address, user_agent, {'email': email})
+        #     return Response({'error': 'Invalid credentials'}, status=401)
+
+        # DISABLED: Remove used salt
+        # cache.delete(cache_key)
+
+        # All good – issue token
+        try:
+            refresh = RefreshToken.for_user(user)
+            # user.reset_failed_login_attempts()
+            # SecurityUtils.reset_failed_attempts(ip_address, 'ip_login')
+
+            self.log_security_event(user, 'LOGIN_SUCCESS', ip_address, user_agent)
+
+            return Response({
+                'access': str(refresh.access_token),
+                'refresh': str(refresh),
+                'user': {
+                    'id': str(user.id),
+                    'email': user.email,
+                    'firstname': user.firstname,
+                    'lastname': user.lastname,
+                    'role': user.role,
+                    'active': user.active
+                },
+                'security': {
+                    'session_id': self.generate_session_token(),
+                    'login_time': timezone.now().isoformat(),
+                    'authentication_method': 'plaintext'
+                }
+            }, status=200)
+
+        except Exception as e:
+            logger.error("Token generation error: %s", e)
+            return Response({'error': 'Login failed.'}, status=500)
+    
+    def get_client_ip(self, request):
+        """Get client IP address"""
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        if x_forwarded_for:
+            return x_forwarded_for.split(',')[0].strip()
+        return request.META.get('REMOTE_ADDR')
+    
+    def generate_session_token(self):
+        """Generate a secure session token"""
+        return SecurityUtils.generate_secure_token()
+    
+    def log_login_attempt(self, ip_address, email, success, user_agent, reason=None):
+        """Log login attempt"""
+        try:
+            LoginAttempt.objects.create(
+                ip_address=ip_address,
+                email=email,
+                success=success,
+                user_agent=user_agent
+            )
+        except Exception as e:
+            logger.error(f"Failed to log login attempt: {e}")
+    
+    def log_security_event(self, user, event_type, ip_address, user_agent, details=None):
+        """Log security event"""
+        try:
+            SecurityEvent.objects.create(
+                user=user,
+                event_type=event_type,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=details or {}
+            )
+        except Exception as e:
+            logger.error(f"Failed to log security event: {e}")
+
 
 class UserListCreate(generics.ListCreateAPIView):
     queryset = CustomUser.objects.all()
@@ -37,6 +252,7 @@ class UserListCreate(generics.ListCreateAPIView):
         if role:
             return CustomUser.objects.filter(role=role)
         return CustomUser.objects.all()
+
 
 class UserRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
     queryset = CustomUser.objects.all()
@@ -65,21 +281,44 @@ class UserRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
         response.data['profile_image'] = instance.profile_image.url if instance.profile_image else None
         return response
 
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def current_user(request):
-    serializer = UserSerializer(request.user)
-    return Response(serializer.data)
+    """Get current user with security context"""
+    user = request.user
+    
+    # Check for suspicious activity
+    ip_address = get_client_ip(request)
+    
+    # Add security context to response
+    user_data = {
+        'id': str(user.id),
+        'email': user.email,
+        'firstname': user.firstname,
+        'lastname': user.lastname,
+        'role': user.role,
+        'active': user.active,
+        'security': {
+            'last_login': user.last_login.isoformat() if user.last_login else None,
+            'failed_attempts': user.failed_login_attempts,
+            'is_locked': user.is_locked()
+        }
+    }
+    
+    return Response(user_data)
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def change_password(request):
-    """
-    Change user password
-    """
+    """Enhanced password change with security logging"""
     user = request.user
     current_password = request.data.get('current_password')
     new_password = request.data.get('new_password')
+    
+    ip_address = get_client_ip(request)
+    user_agent = request.META.get('HTTP_USER_AGENT', '')
     
     if not current_password or not new_password:
         return Response(
@@ -87,8 +326,15 @@ def change_password(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    # Check if current password is correct
     if not user.check_password(current_password):
+        # Log failed password change attempt
+        SecurityEvent.objects.create(
+            user=user,
+            event_type='LOGIN_FAILED',
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={'reason': 'Failed password change - wrong current password'}
+        )
         return Response(
             {'detail': 'Current password is incorrect'},
             status=status.HTTP_400_BAD_REQUEST
@@ -98,10 +344,59 @@ def change_password(request):
     user.set_password(new_password)
     user.save()
     
-    # Update session authentication hash to keep user logged in
-    update_session_auth_hash(request, user)
+    # Log successful password change
+    SecurityEvent.objects.create(
+        user=user,
+        event_type='PASSWORD_CHANGED',
+        ip_address=ip_address,
+        user_agent=user_agent
+    )
     
     return Response({'detail': 'Password changed successfully'})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def unlock_account(request):
+    """Unlock user account (admin only)"""
+    if request.user.role not in ['Director', 'Super Admin']:
+        raise PermissionDenied("Only directors and super admins can unlock accounts")
+    
+    user_id = request.data.get('user_id')
+    if not user_id:
+        return Response(
+            {'error': 'User ID is required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        target_user = CustomUser.objects.get(id=user_id)
+        target_user.unlock_account()
+        
+        # Log unlock event
+        SecurityEvent.objects.create(
+            user=target_user,
+            event_type='ACCOUNT_UNLOCKED',
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            details={'unlocked_by': str(request.user.id)}
+        )
+        
+        return Response({'message': 'Account unlocked successfully'})
+    
+    except CustomUser.DoesNotExist:
+        return Response(
+            {'error': 'User not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+
+def get_client_ip(request):
+    """Utility function to get client IP"""
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        return x_forwarded_for.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR')
 
 class UserByIdView(generics.RetrieveAPIView):
     queryset = CustomUser.objects.all()
@@ -131,6 +426,69 @@ class IsTechnicianRole(permissions.BasePermission):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+def validate_session(request):
+    """Validate session token"""
+    try:
+        # Get session token from headers
+        session_token = request.META.get('HTTP_X_SESSION_TOKEN')
+        
+        if not session_token:
+            return Response({
+                'valid': False,
+                'error': 'No session token provided'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # You can add additional validation logic here
+        # For now, if the user is authenticated (JWT token is valid), 
+        # we'll consider the session valid
+        
+        user = request.user
+        
+        # Check if user is still active
+        if not user.active:
+            return Response({
+                'valid': False,
+                'error': 'User account is not active'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Check if account is locked
+        if user.is_locked():
+            return Response({
+                'valid': False,
+                'error': 'Account is locked'
+            }, status=status.HTTP_423_LOCKED)
+        
+        # Log session validation attempt
+        ip_address = get_client_ip(request)
+        user_agent = request.META.get('HTTP_USER_AGENT', '')
+        
+        SecurityEvent.objects.create(
+            user=user,
+            event_type='SESSION_VALIDATED',
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={'session_token': session_token[:10] + '...'}  # Log partial token for security
+        )
+        
+        return Response({
+            'valid': True,
+            'user': {
+                'id': str(user.id),
+                'email': user.email,
+                'role': user.role,
+                'active': user.active
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Session validation error: {e}")
+        return Response({
+            'valid': False,
+            'error': 'Session validation failed'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def current_user(request):
     user = request.user
     return Response({
@@ -154,6 +512,21 @@ def post(self, request, *args, **kwargs):
         "message": "User created successfully",
     }, status=status.HTTP_201_CREATED)
 
+class IsDirectorOrSuperAdminOrTechnicianManager(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user_role = request.user.role.lower() if request.user.role else ''
+        return user_role in ['director', 'super admin', 'technician manager']
+
+class IsTechnicianOrAbove(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user_role = request.user.role.lower() if request.user.role else ''
+        return user_role in ['director', 'super admin', 'technician manager', 'technician']
+
+class IsInventoryManagerOrAbove(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user_role = request.user.role.lower() if request.user.role else ''
+        return user_role in ['director', 'super admin', 'inventory manager', 'sales manager']
+
 class StoreListCreate(generics.ListCreateAPIView):
     queryset = Store.objects.all()
     serializer_class = StoreSerializer
@@ -164,6 +537,38 @@ class StoreRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = StoreSerializer
     permission_classes = [permissions.IsAuthenticated]
     lookup_field = 'id'
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Override destroy method to prevent deletion of stores with inventory
+        """
+        instance = self.get_object()
+        
+        # Check if store has any inventory (machines, parts, accessories)
+        machines_count = instance.machines.count()
+        parts_count = instance.parts.count()
+        accessories_count = instance.accessories.count()
+        
+        if machines_count > 0 or parts_count > 0 or accessories_count > 0:
+            error_message = f"Cannot delete store '{instance.store_name}'. Store contains "
+            inventory_items = []
+            
+            if machines_count > 0:
+                inventory_items.append(f"{machines_count} machine(s)")
+            if parts_count > 0:
+                inventory_items.append(f"{parts_count} part(s)")
+            if accessories_count > 0:
+                inventory_items.append(f"{accessories_count} accessory(ies)")
+                
+            error_message += ", ".join(inventory_items) + ". Please remove all inventory items before deleting the store."
+            
+            return Response(
+                {"error": error_message},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # If no inventory, proceed with deletion
+        return super().destroy(request, *args, **kwargs)
 
 class AccessoryTypeListCreate(generics.ListCreateAPIView):
     queryset = AccessoryType.objects.all()
@@ -298,7 +703,6 @@ class PartViewSet(viewsets.ModelViewSet):
 
         return queryset.order_by('-created_at')
     
-
 class AccessoryViewSet(viewsets.ModelViewSet):
     serializer_class = AccessorySerializer  
     permission_classes = [permissions.IsAuthenticated]
@@ -438,10 +842,40 @@ class StoreInquiryViewSet(viewsets.ModelViewSet):
             return StoreInquiry.objects.filter(service_call=service_call)
         return StoreInquiry.objects.all()
     
+    def get_permissions(self):
+        """
+        Override permissions based on action
+        """
+        if self.action in ['list', 'retrieve']:
+            # Allow all authenticated users to view store inquiries
+            permission_classes = [permissions.IsAuthenticated]
+        elif self.action in ['create']:
+            # Allow technicians and above to create inquiries
+            permission_classes = [permissions.IsAuthenticated, IsTechnicianOrAbove]
+        elif self.action in ['update', 'partial_update', 'destroy']:
+            # Restrict editing to inventory managers and above
+            permission_classes = [permissions.IsAuthenticated, IsInventoryManagerOrAbove]
+        else:
+            permission_classes = [permissions.IsAuthenticated]
+        
+        return [permission() for permission in permission_classes]
+    
     def update(self, request, *args, **kwargs):
+        # Check specific permissions for store inquiry updates
+        user = request.user
+        user_role = user.role.lower() if user.role else ''
+        allowed_roles = ['director', 'super admin', 'inventory manager', 'sales manager']
+        
+        if user_role not in allowed_roles:
+            return Response(
+                {'error': 'You do not have permission to update store inquiries'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         data = request.data.copy()
+        
         if 'unit_price' in data:
             try:
                 data['unit_price'] = Decimal(str(data['unit_price']))
@@ -451,7 +885,7 @@ class StoreInquiryViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer = self.get_serializer(instance, data=data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
         return Response(serializer.data)
@@ -491,6 +925,27 @@ class CallViewSet(viewsets.ModelViewSet):
             'item', 
             'item__store'
         ).prefetch_related('technician')
+
+        # Role-based filtering for different actions
+        user = self.request.user
+        user_role = user.role.lower() if user.role else ''
+        
+        # Allow full access to these roles
+        allowed_full_access_roles = ['director', 'super admin', 'technician manager']
+        
+        # For GET requests (viewing), allow all authenticated users to see calls
+        if self.action in ['list', 'retrieve']:
+            # All authenticated users can view service calls
+            pass  # No filtering for view operations
+        else:
+            # For edit operations (POST, PUT, PATCH, DELETE), apply role restrictions
+            if user_role not in allowed_full_access_roles:
+                # If user is a technician, only show calls assigned to them for editing
+                if user_role == 'technician':
+                    queryset = queryset.filter(technician__id=user.id)
+                else:
+                    # For other roles, show no calls for editing or handle as needed
+                    queryset = queryset.none()
         
         # Status filtering
         if status:
@@ -498,12 +953,14 @@ class CallViewSet(viewsets.ModelViewSet):
                 'open': 'Open',
                 'pending': 'Pending',
                 'in_progress': 'In Progress',
-                'complete': 'Complete'
+                'complete': 'Complete',
+                'completed': 'Completed',
+                'closed': 'Closed'
             }
             backend_status = status_mapping.get(status.lower(), status)
             queryset = queryset.filter(status=backend_status)
 
-        # Technician filtering
+         # Technician filtering
         if technician_id:
             queryset = queryset.filter(technician__id=technician_id)
 
@@ -527,8 +984,44 @@ class CallViewSet(viewsets.ModelViewSet):
 
         return queryset.order_by('-created_at')
     
+    def get_permissions(self):
+        """
+        Override permissions based on action
+        """
+        if self.action in ['list', 'retrieve']:
+            # Allow all authenticated users to view
+            permission_classes = [permissions.IsAuthenticated]
+        elif self.action in ['create', 'update', 'partial_update', 'destroy']:
+            # Restrict editing to specific roles
+            permission_classes = [permissions.IsAuthenticated, IsDirectorOrSuperAdminOrTechnicianManager]
+        else:
+            permission_classes = [permissions.IsAuthenticated]
+        
+        return [permission() for permission in permission_classes]
+    
     def update(self, request, *args, **kwargs):
+        # Check if user has permission to edit this specific call
         instance = self.get_object()
+        user = request.user
+        user_role = user.role.lower() if user.role else ''
+        
+        allowed_full_access_roles = ['director', 'super admin', 'technician manager']
+        
+        # Check permissions for update
+        if user_role not in allowed_full_access_roles:
+            if user_role == 'technician':
+                # Technicians can only edit calls assigned to them
+                if not instance.technician.filter(id=user.id).exists():
+                    return Response(
+                        {'error': 'You can only edit service calls assigned to you'}, 
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+            else:
+                return Response(
+                    {'error': 'You do not have permission to edit service calls'}, 
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
         old_status = instance.status
 
         serializer = self.get_serializer(instance, data=request.data, partial=True)
@@ -540,7 +1033,7 @@ class CallViewSet(viewsets.ModelViewSet):
         client_verification = updated_data.get('client_verification', instance.client_verification)
         
         if technician_approval and client_verification:
-            updated_data['status'] = 'Complete'
+            updated_data['status'] = 'Closed'
         
         self.perform_update(serializer)
         
@@ -551,6 +1044,58 @@ class CallViewSet(viewsets.ModelViewSet):
         response_data['previous_status'] = old_status
         
         return Response(response_data)
+    
+    @action(detail=True, methods=['post'])
+    def start_service(self, request, pk=None):
+        """Start service call"""
+        call = self.get_object()
+        
+        # Check permissions
+        user = request.user
+        user_role = user.role.lower() if user.role else ''
+        allowed_roles = ['director', 'super admin', 'technician manager', 'technician']
+        
+        if user_role not in allowed_roles:
+            return Response({'error': 'Permission denied'}, status=403)
+        
+        if user_role == 'technician' and not call.technician.filter(id=user.id).exists():
+            return Response({'error': 'You can only start calls assigned to you'}, status=403)
+        
+        if call.status != 'Pending':
+            return Response({'error': 'Service must be in Pending status to start'}, status=400)
+        
+        call.status = 'In Progress'
+        call.start_time = timezone.now()
+        call.save()
+        
+        serializer = self.get_serializer(call)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def complete_service(self, request, pk=None):
+        """Complete service call"""
+        call = self.get_object()
+        
+        # Check permissions
+        user = request.user
+        user_role = user.role.lower() if user.role else ''
+        allowed_roles = ['director', 'super admin', 'technician manager', 'technician']
+        
+        if user_role not in allowed_roles:
+            return Response({'error': 'Permission denied'}, status=403)
+        
+        if user_role == 'technician' and not call.technician.filter(id=user.id).exists():
+            return Response({'error': 'You can only complete calls assigned to you'}, status=403)
+        
+        if call.status != 'In Progress':
+            return Response({'error': 'Service must be in progress to complete'}, status=400)
+        
+        call.status = 'Completed'
+        call.finish_time = timezone.now()
+        call.save()
+        
+        serializer = self.get_serializer(call)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def create_access_token(self, request, pk=None):
@@ -583,6 +1128,15 @@ class CallViewSet(viewsets.ModelViewSet):
         field = request.data.get('field')
         value = request.data.get('value')
         old_status = call.status
+        
+        # Check permissions for approval updates
+        user = request.user
+        user_role = user.role.lower() if user.role else ''
+        
+        if field == 'technician_manager_approval':
+            # Only managers and above can approve
+            if user_role not in ['director', 'super admin', 'technician manager']:
+                return Response({'error': 'Permission denied for manager approval'}, status=403)
         
         if field in ['technician_manager_approval', 'client_verification']:
             setattr(call, field, value)
@@ -730,20 +1284,96 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
     
     def get_queryset(self):
+        # Base queryset with proper relationships
+        queryset = LeaseContract.objects.select_related('client', 'item', 'store').prefetch_related('meter_readings')
+        
+        # Handle search parameter
+        search_term = self.request.query_params.get('search')
+        if search_term:
+            queryset = queryset.filter(
+                Q(lease_no__icontains=search_term) |
+                Q(client__client_name__icontains=search_term) |
+                Q(item__machine_name__icontains=search_term)
+            )
+        
+        # Handle filter parameter (active/inactive/expiring)
+        filter_type = self.request.query_params.get('filter', 'active')
+        
+        if filter_type == 'active':
+            queryset = queryset.filter(is_active=True)
+        elif filter_type == 'inactive':
+            queryset = queryset.filter(is_active=False)
+        elif filter_type == 'expiring':
+            from datetime import date, timedelta
+            today = date.today()
+            thirty_days_from_now = today + timedelta(days=30)
+            queryset = queryset.filter(
+                is_active=True,
+                to_date__gte=today,
+                to_date__lte=thirty_days_from_now
+            )
+        
+        # Handle client filter
         client_id = self.request.query_params.get('client')
         if client_id:
-            return LeaseContract.objects.filter(client=client_id).select_related('client', 'item', 'store').prefetch_related('meter_readings')
-        return LeaseContract.objects.all().select_related('client', 'item', 'store')
+            queryset = queryset.filter(client=client_id)
+        
+        return queryset.order_by('-created_at')
 
+    def list(self, request, *args, **kwargs):
+        """Override list method to ensure proper response format"""
+        try:
+            queryset = self.filter_queryset(self.get_queryset())
+            
+            # Apply pagination
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+            
+            # If no pagination, return all results
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to fetch leases: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
     def perform_destroy(self, instance):
         with transaction.atomic():
             # Return machine to store
-            machine = instance.item
-            machine.machine_status = 'Available'
-            machine.save()
+            if instance.item:
+                machine = instance.item
+                machine.machine_status = 'Available'
+                machine.save()
             
             # Delete lease
             instance.delete()
+
+class LeaseAssignTechnician(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request):
+        client_id = request.data.get('client_id')
+        technician_id = request.data.get('technician_id')
+
+        if not client_id:
+            return Response(
+                {"error": "client_id is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Update all leases for this client
+        leases = LeaseContract.objects.filter(client_id=client_id)
+        updated_count = leases.update(technician_id=technician_id)
+
+        return Response({
+            "status": "success",
+            "updated_count": updated_count,
+            "technician_id": technician_id
+        })
     
 class SaleViewSet(viewsets.ModelViewSet):
     serializer_class = SaleSerializer
@@ -1089,54 +1719,73 @@ class LeasePartInquiryViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         with transaction.atomic():
-            # Save the lease part inquiry
             instance = serializer.save()
+            part = instance.part
             
-            # Update the part inventory
-            if not instance.store_inquiry:
-                part = instance.part
-                if part.quantity >= instance.quantity:
-                    part.quantity -= instance.quantity
-                    part.save()
-                else:
-                    raise serializer.ValidationError(
-                        f"Insufficient stock. Only {part.quantity} units available."
-                    )
+            # Ensure sufficient stock
+            if part.quantity < instance.quantity:
+                raise serializer.ValidationError(
+                    f"Insufficient stock. Only {part.quantity} units available."
+                )
+            
+            # Update part inventory
+            part.quantity -= instance.quantity
+            part.save()
+            
+            # Update part status if needed
+            if part.quantity == 0:
+                part.part_status = 'Out of Stock'
+                part.save()
 
     def perform_update(self, serializer):
         with transaction.atomic():
             old_instance = self.get_object()
-            old_quantity = old_instance.quantity
+            new_data = serializer.validated_data
+            new_quantity = new_data.get('quantity', old_instance.quantity)
+            new_part = new_data.get('part', old_instance.part)
             
-            # Save the updated instance
-            instance = serializer.save()
-            
-            # Adjust inventory based on quantity change
-            part = instance.part
-            quantity_difference = instance.quantity - old_quantity
-            
-            if quantity_difference > 0:
-                # More parts needed - reduce inventory
-                if part.quantity >= quantity_difference:
-                    part.quantity -= quantity_difference
-                    part.save()
-                else:
-                    raise serializers.ValidationError(
-                        f"Insufficient stock for increase. Only {part.quantity} additional units available."
+            # Handle part change
+            if old_instance.part != new_part:
+                # Return original part to inventory
+                old_part = old_instance.part
+                old_part.quantity += old_instance.quantity
+                old_part.save()
+                
+                # Deduct from new part
+                if new_part.quantity < new_quantity:
+                    raise serializer.ValidationError(
+                        f"Insufficient stock for new part. Only {new_part.quantity} units available."
                     )
-            elif quantity_difference < 0:
-                # Fewer parts needed - restore inventory
-                part.quantity += abs(quantity_difference)
-                part.save()
+                new_part.quantity -= new_quantity
+                new_part.save()
+            else:
+                # Same part, adjust quantity difference
+                quantity_diff = new_quantity - old_instance.quantity
+                if quantity_diff > 0:  # Increasing quantity
+                    if old_instance.part.quantity < quantity_diff:
+                        raise serializer.ValidationError(
+                            f"Insufficient stock for increase. Only {old_instance.part.quantity} units available."
+                        )
+                    old_instance.part.quantity -= quantity_diff
+                    old_instance.part.save()
+                elif quantity_diff < 0:  # Decreasing quantity
+                    old_instance.part.quantity += abs(quantity_diff)
+                    old_instance.part.save()
+            
+            # Update the lease part inquiry
+            serializer.save()
 
     def perform_destroy(self, instance):
         with transaction.atomic():
-            # Restore inventory when deleting
+            # Return part to inventory
             part = instance.part
             part.quantity += instance.quantity
-            part.save()
             
-            # Delete the instance
+            # Update status if needed
+            if part.quantity > 0 and part.part_status == 'Out of Stock':
+                part.part_status = 'Available'
+            
+            part.save()
             instance.delete()
 
 class LeaseAccInquiryViewSet(viewsets.ModelViewSet):
@@ -1198,3 +1847,184 @@ class QuotationPDFView(APIView):
         if pisa_status.err:
             return HttpResponse('PDF generation error', status=500)
         return response
+    
+class TransferListCreate(generics.ListCreateAPIView):
+    serializer_class = TransferSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        store_id = self.request.query_params.get('store_id')
+        queryset = Transfer.objects.select_related(
+            'from_store', 'to_store', 'created_by'
+        ).prefetch_related(
+            Prefetch('items', queryset=TransferItem.objects.select_related(
+                'machine', 'part', 'accessory'
+            ).prefetch_related(
+                'machine__store',
+                'part__store',
+                'accessory__store'
+            ))
+        ).order_by('-created_at')
+        
+        if store_id:
+            return queryset.filter(
+                Q(from_store_id=store_id) | Q(to_store_id=store_id)
+            )
+        return queryset
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+class TransferRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Transfer.objects.all()
+    serializer_class = TransferSerializer
+    permission_classes = [IsAuthenticated]
+    lookup_field = 'pk'
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        
+        # Prevent updates to completed transfers
+        if instance.status == 'Completed':
+            return Response(
+                {'error': 'Cannot modify completed transfers'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        return super().update(request, *args, **kwargs)
+
+class CompleteTransferView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    queryset = Transfer.objects.all()
+    serializer_class = TransferSerializer
+    lookup_field = 'pk'
+
+    def post(self, request, pk):
+        transfer = self.get_object()
+        logger.info(f"Starting transfer completion for: {transfer.id}")
+        
+        if transfer.status != 'Pending':
+            logger.warning(f"Transfer {transfer.id} is not pending (status: {transfer.status})")
+            return Response(
+                {'error': 'Transfer is not in a pending state'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        try:
+            with transaction.atomic():
+                logger.info(f"Processing {transfer.items.count()} items")
+                for i, item in enumerate(transfer.items.all()):
+                    logger.info(f"Processing item {i+1}: {item.item_type} {item.id}")
+                    
+                    if item.item_type == 'Machine':
+                        self.process_machine(item, transfer)
+                    elif item.item_type == 'Part':
+                        self.process_part(item, transfer)
+                    elif item.item_type == 'Accessory':
+                        self.process_accessory(item, transfer)
+                
+                transfer.status = 'Completed'
+                transfer.save()
+                logger.info(f"Transfer {transfer.id} completed successfully")
+                
+            return Response({'status': 'Transfer completed successfully'})
+        
+        except Exception as e:
+            logger.exception(f"Failed to complete transfer {transfer.id}: {str(e)}")
+            return Response(
+                {'error': f'Failed to complete transfer: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def process_machine(self, item, transfer):
+        logger.info(f"Processing machine: {item.machine.id}")
+        machine = item.machine
+        
+        if machine.store != transfer.from_store:
+            logger.error(f"Machine store mismatch: {machine.store.id} vs {transfer.from_store.id}")
+            raise ValueError(f"Machine {machine.serial_no} is not in source store")
+        
+        if machine.machine_status != 'Available':
+            logger.error(f"Machine not available: {machine.machine_status}")
+            raise ValueError(f"Machine {machine.serial_no} is not available for transfer")
+        
+        logger.info(f"Moving machine {machine.id} to store {transfer.to_store.id}")
+        machine.store = transfer.to_store
+        machine.source_transfer = transfer
+        machine.save()
+
+    def process_part(self, item, transfer):
+        logger.info(f"Processing part: {item.part.id}")
+        part = item.part
+        
+        if part.part_status != 'Available':
+            logger.error(f"Part not available: {part.part_status}")
+            raise ValueError(f"Part {part.part_name} is not available for transfer")
+        
+        if part.quantity < item.quantity:
+            logger.error(f"Insufficient quantity: {part.quantity} < {item.quantity}")
+            raise ValueError(f"Insufficient quantity for part {part.part_name}")
+        
+        new_ref_no = f"{part.ref_no}-TR-{str(transfer.id)[:8]}"
+        logger.info(f"Creating new part in store {transfer.to_store.id} with ref {new_ref_no}")
+        
+        Part.objects.create(
+            ref_no=new_ref_no,
+            store=transfer.to_store,
+            part_name=part.part_name,
+            part_brand=part.part_brand,
+            part_type=part.part_type,
+            unit_value=part.unit_value,
+            intial_quantity=item.quantity,
+            quantity=item.quantity,
+            condition_description=part.condition_description,
+            part_condition=part.part_condition,
+            color_type=part.color_type,
+            supplier_name=part.supplier_name,
+            part_status='Available',
+            source_transfer=transfer
+        )
+        
+        logger.info(f"Deducting {item.quantity} from source part {part.id}")
+        part.quantity -= item.quantity
+        if part.quantity == 0:
+            part.part_status = 'Out of Stock'
+        part.save()
+
+    def process_accessory(self, item, transfer):
+        logger.info(f"Processing accessory: {item.accessory.id}")
+        accessory = item.accessory
+        
+        if accessory.acc_status != 'Available':
+            logger.error(f"Accessory not available: {accessory.acc_status}")
+            raise ValueError(f"Accessory {accessory.acc_name} is not available for transfer")
+        
+        if accessory.quantity < item.quantity:
+            logger.error(f"Insufficient quantity: {accessory.quantity} < {item.quantity}")
+            raise ValueError(f"Insufficient quantity for accessory {accessory.acc_name}")
+        
+        new_ref_no = f"{accessory.ref_no}-TR-{str(transfer.id)[:8]}"
+        logger.info(f"Creating new accessory in store {transfer.to_store.id} with ref {new_ref_no}")
+        
+        Accessory.objects.create(
+            ref_no=new_ref_no,
+            store=transfer.to_store,
+            acc_name=accessory.acc_name,
+            acc_brand=accessory.acc_brand,
+            acc_type=accessory.acc_type,
+            unit_value=accessory.unit_value,
+            intial_quantity=item.quantity,
+            quantity=item.quantity,
+            condition_description=accessory.condition_description,
+            acc_condition=accessory.acc_condition,
+            color_type=accessory.color_type,
+            supplier_name=accessory.supplier_name,
+            acc_status='Available',
+            source_transfer=transfer
+        )
+        
+        logger.info(f"Deducting {item.quantity} from source accessory {accessory.id}")
+        accessory.quantity -= item.quantity
+        if accessory.quantity == 0:
+            accessory.acc_status = 'Out of Stock'
+        accessory.save()

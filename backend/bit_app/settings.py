@@ -62,6 +62,7 @@ CHANNEL_LAYERS = {
 }
 
 MIDDLEWARE = [
+    'csp.middleware.CSPMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -70,6 +71,9 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'bititec.middleware.SecurityMiddleware',  
+    'bititec.middleware.APISecurityMiddleware',
+    'bititec.middleware.RequestFingerprintingMiddleware',
 ]
 
 ROOT_URLCONF = 'bit_app.urls'
@@ -184,14 +188,29 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
-    'x-servicecall-token',  # Add your custom header
-    'x-token-validation',   # Add your custom header
+    'x-servicecall-token',  
+    'x-token-validation',   
+    'content-security-policy',
+    'x-request-fingerprint', 
+    'x-client-version',
+    'x-client-platform',
+    'x-session-token',
 ]
 
 CORS_EXPOSE_HEADERS = [
     'x-servicecall-token',
     'x-token-validation',
+    'content-security-policy',
+    'x-request-fingerprint',
+    'x-client-version',
+    'x-client-platform',
 ]
+
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+SECURE_HSTS_SECONDS = 31536000  # 1 year
+SECURE_SSL_REDIRECT = True
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (

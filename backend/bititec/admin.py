@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Accessory, AccessoryType, Call, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, Machine, MachineType, MeterReading, Part, PartType, Quotation, QuotationItem, ServiceCallToken, Store, Sale, SaleItem, StoreInquiry
+from .models import Accessory, AccessoryType, Call, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, Machine, MachineType, MeterReading, Part, PartType, Quotation, QuotationItem, Sale, SaleItem, SecurityEvent, ServiceCallToken, Store, StoreInquiry
 from django.utils.html import format_html
 
 class CustomUserAdmin(UserAdmin):
@@ -316,3 +316,18 @@ class QuotationItemAdmin(admin.ModelAdmin):
     list_filter = ('item_type',)
     search_fields = ('item_name', 'quotation__quotation_no')
     readonly_fields = ('total_price',)
+
+# New admin registrations for previously missing models
+@admin.register(LoginAttempt)
+class LoginAttemptAdmin(admin.ModelAdmin):
+    list_display = ('ip_address', 'email', 'success', 'timestamp')
+    list_filter = ('success', 'timestamp')
+    search_fields = ('ip_address', 'email')
+    readonly_fields = ('timestamp',)
+
+@admin.register(SecurityEvent)
+class SecurityEventAdmin(admin.ModelAdmin):
+    list_display = ('user', 'event_type', 'ip_address', 'timestamp')
+    list_filter = ('event_type', 'timestamp')
+    search_fields = ('user__email', 'ip_address', 'event_type')
+    readonly_fields = ('timestamp',)

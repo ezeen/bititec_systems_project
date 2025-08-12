@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StoreInquiry
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StoreInquiry, Transfer, TransferItem
 from django.db.models import Sum
 from dateutil.relativedelta import relativedelta
 from django.utils import timezone
@@ -15,6 +15,13 @@ class UserSerializer(serializers.ModelSerializer):
         allow_blank=True,
         max_length=20
     )
+    is_locked = serializers.SerializerMethodField()
+    failed_login_attempts = serializers.IntegerField(read_only=True)
+    locked_until = serializers.DateTimeField(read_only=True)
+    last_failed_login = serializers.DateTimeField(read_only=True)
+
+    def get_is_locked(self, obj):
+        return obj.is_locked()
 
     def validate_phonenumber(self, value):
         """Validate phone number format"""
@@ -32,14 +39,20 @@ class UserSerializer(serializers.ModelSerializer):
         return value
 
     def update(self, instance, validated_data):
-        # Handle profile image separately
-        profile_image = validated_data.pop('profile_image', None)
-        if profile_image:
-            # Delete old image if exists
-            if instance.profile_image:
+        # Handle profile image update properly
+        profile_image = validated_data.get('profile_image', None)
+        if profile_image is not None:
+            # Only delete old image if a new one is provided (not None)
+            if profile_image and instance.profile_image:
+                # Delete old image file
                 instance.profile_image.delete(save=False)
             instance.profile_image = profile_image
-        
+            
+        # Handle phone number formatting
+        phonenumber = validated_data.get('phonenumber')
+        if phonenumber is not None:
+            validated_data['phonenumber'] = phonenumber
+            
         return super().update(instance, validated_data)
     
     def to_representation(self, instance):
@@ -47,15 +60,25 @@ class UserSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         
         # Ensure profile_image returns full URL
-        if instance.profile_image:
-            # Get the full URL including domain
-            request = self.context.get('request')
-            if request:
-                data['profile_image'] = request.build_absolute_uri(instance.profile_image.url)
-            else:
-                data['profile_image'] = instance.profile_image.url
+        if instance.profile_image and instance.profile_image.name:
+            try:
+                # Get the full URL including domain
+                request = self.context.get('request')
+                if request:
+                    data['profile_image'] = request.build_absolute_uri(instance.profile_image.url)
+                else:
+                    data['profile_image'] = instance.profile_image.url
+            except ValueError:
+                # Handle case where image file doesn't exist
+                data['profile_image'] = None
         else:
             data['profile_image'] = None
+            
+        # Ensure phone number is properly formatted for display
+        if instance.phonenumber:
+            data['phonenumber'] = instance.phonenumber
+        else:
+            data['phonenumber'] = ''
             
         return data
     
@@ -63,7 +86,8 @@ class UserSerializer(serializers.ModelSerializer):
         model = CustomUser
         fields = [
             'id', 'email', 'firstname', 'lastname',
-            'phonenumber', 'role', 'active', 'profile_image',
+            'phonenumber', 'role', 'active', 'profile_image', 'is_locked',
+            'failed_login_attempts', 'locked_until', 'last_failed_login'
         ]
         extra_kwargs = {'password': {'write_only': True}, 'role': {'read_only': True}}
         
@@ -212,6 +236,7 @@ class MachineSerializer(serializers.ModelSerializer):
         write_only=True,
         required=True
     )
+    source_transfer = serializers.PrimaryKeyRelatedField(read_only=True)
     
     class Meta:
         model = Machine
@@ -227,12 +252,13 @@ class MachineSerializer(serializers.ModelSerializer):
             'created_at',
             'machine_condition',
             'color_type',
-            'store',  # Now included in fields list
+            'store',  
             'store_id',
             'store_name',
             'supplier_name',
             'machine_status',
-            'is_transfer'
+            'is_transfer',
+            'source_transfer'  
         ]
         extra_kwargs = {
             'created_at': {'read_only': True}
@@ -308,6 +334,16 @@ class LeaseContractSerializer(serializers.ModelSerializer):
     client = ClientSerializer(read_only=True)
     meter_readings = MeterReadingSerializer(many=True, read_only=True)
     missing_readings = serializers.SerializerMethodField()
+    technician = UserSerializer(read_only=True)
+    technician_id = serializers.PrimaryKeyRelatedField(
+        queryset=CustomUser.objects.filter(
+            role__in=['Technician', 'Technician Manager']
+        ),
+        write_only=True,
+        source='technician',
+        required=False,
+        allow_null=True
+    )
     
     class Meta:
         model = LeaseContract
@@ -315,7 +351,7 @@ class LeaseContractSerializer(serializers.ModelSerializer):
             'id', 'client', 'client_name', 'client_location', 'department', 
             'item', 'item_id', 'item_name', 'client_id',
             'serial_no', 'store', 'store_name', 'from_date', 'to_date', 'add_vat', 'add_myq',
-            'billed_myq', 'is_active', 'contract_type', 'lease_no', 'created_at', 'client', 'meter_readings', 'missing_readings'
+            'billed_myq', 'is_active', 'contract_type', 'lease_no', 'created_at', 'client', 'meter_readings', 'missing_readings', 'technician', 'technician_id'
         ]
         extra_kwargs = {
             'created_at': {'read_only': True},
@@ -417,6 +453,10 @@ class PartSerializer(serializers.ModelSerializer):
     )
     leased_quantity = serializers.SerializerMethodField()
     sold_quantity = serializers.SerializerMethodField()
+    source_transfer = serializers.PrimaryKeyRelatedField(read_only=True)
+    transferred_quantity = serializers.ReadOnlyField()
+    received_quantity = serializers.ReadOnlyField()
+    transfer_history = serializers.ReadOnlyField()
     
     class Meta:
         model = Part
@@ -441,8 +481,10 @@ class PartSerializer(serializers.ModelSerializer):
             'is_transfer',
             'leased_quantity', 
             'sold_quantity',
+            'transferred_quantity', 'received_quantity', 'transfer_history',
             'lease_inquiries', 
-            'sold_items'
+            'sold_items',
+            'source_transfer'
         ]
         extra_kwargs = {
             'store': {'write_only': True},
@@ -518,6 +560,11 @@ class AccessorySerializer(serializers.ModelSerializer):
         source='leaseaccinquiry_set'
     )
     sold_items = serializers.SerializerMethodField()
+    source_transfer = serializers.PrimaryKeyRelatedField(read_only=True)
+    transferred_quantity = serializers.ReadOnlyField()
+    received_quantity = serializers.ReadOnlyField()
+    transfer_history = serializers.ReadOnlyField()
+
 
     class Meta:
         model = Accessory
@@ -530,7 +577,7 @@ class AccessorySerializer(serializers.ModelSerializer):
             'unit_value',
             'intial_quantity',
             'quantity',
-            'conditon_description',
+            'condition_description',
             'created_at',
             'acc_condition',
             'color_type',
@@ -543,7 +590,9 @@ class AccessorySerializer(serializers.ModelSerializer):
             'leased_quantity', 
             'sold_quantity',
             'lease_inquiries', 
-            'sold_items'
+             'transferred_quantity', 'received_quantity', 'transfer_history',
+            'sold_items',
+            'source_transfer'
         ]
         extra_kwargs = {
             'store': {'write_only': True},
@@ -634,6 +683,12 @@ class CallSerializer(serializers.ModelSerializer):
     walk_in_machine = serializers.JSONField(write_only=True, required=False)
     
     reported_date = serializers.DateTimeField(format="%Y-%m-%d", required=False)
+
+    action_taken = serializers.CharField(required=False, allow_blank=True)
+    parts_required = serializers.CharField(required=False, allow_blank=True)
+    parts_used = serializers.CharField(required=False, allow_blank=True)
+    start_time = serializers.DateTimeField(format="%Y-%m-%d %H:%M", required=False, allow_null=True)
+    finish_time = serializers.DateTimeField(format="%Y-%m-%d %H:%M", required=False, allow_null=True)
     
     class Meta:
         model = Call
@@ -646,7 +701,8 @@ class CallSerializer(serializers.ModelSerializer):
             'fault_reported', 'action_taken', 'meter_reading', 'parts_required', 'parts_used',
             'comments', 'status', 'department', 'is_checked', 'director_comment', 'ticket_no',
             'spare_description', 'created_at', 'walk_in_machine',
-            'walk_in_machine_name', 'walk_in_machine_type', 'walk_in_serial_no', 'technician_manager_approval', 'client_verification'
+            'walk_in_machine_name', 'walk_in_machine_type', 'walk_in_serial_no', 'technician_manager_approval', 'client_verification',
+            'finish_time', 'start_time'
         ]
         extra_kwargs = {
             'created_at': {'read_only': True},
@@ -669,7 +725,13 @@ class CallSerializer(serializers.ModelSerializer):
             validated_data['walk_in_serial_no'] = walk_in_machine.get('serialNo', '')
         
         call = Call.objects.create(**validated_data)
-        call.technician.set(technicians)
+        if technicians:
+            call.technician.set(technicians)
+            call.status = 'Pending'
+        else:
+            call.status = 'Open'
+        
+        call.save()
         return call
     
     def update(self, instance, validated_data):
@@ -705,7 +767,7 @@ class CallSerializer(serializers.ModelSerializer):
         if client_verification_changed or technician_approval_changed:
             # Check if both approvals are now True and update status
             if instance.client_verification and instance.technician_manager_approval:
-                instance.status = 'Complete'
+                instance.status = 'Closed'
         
         instance.save()
         return instance
@@ -725,6 +787,13 @@ class CallSerializer(serializers.ModelSerializer):
         if instance.contract_type == 'WalkIn' and not instance.client:
             data['client_name'] = instance.client_name or ''
             data['client_location'] = instance.client_location or ''
+
+        # Ensure technician is always a list
+        if 'technician' in data and data['technician'] is not None:
+            if not isinstance(data['technician'], list):
+                data['technician'] = [data['technician']]
+        else:
+            data['technician'] = []
         
         return data
     
@@ -738,22 +807,10 @@ class CallSerializer(serializers.ModelSerializer):
             
             # Validate walk-in specific fields
             client_name = data.get('client_name', '').strip()
-            client_location = data.get('client_location', '').strip()
             
             if not client_name:
                 raise serializers.ValidationError("Client name is required for Walk-In calls")
-            if not client_location:
-                raise serializers.ValidationError("Client location is required for Walk-In calls")
             
-            walk_in_machine = data.get('walk_in_machine')
-            if not walk_in_machine:
-                raise serializers.ValidationError("Machine details are required for Walk-In calls")
-                
-            machine_name = walk_in_machine.get('machineName', '').strip()
-            serial_no = walk_in_machine.get('serialNo', '').strip()
-            
-            if not machine_name or not serial_no:
-                raise serializers.ValidationError("Machine name and serial number are required for Walk-In calls")
             
             return data
             
@@ -1185,5 +1242,125 @@ class QuotationSerializer(serializers.ModelSerializer):
         for item in current_items:
             if item.id not in updated_items:
                 item.delete()
+        
+        return instance
+    
+class TransferItemSerializer(serializers.ModelSerializer):
+    # For write operations
+    machine = serializers.PrimaryKeyRelatedField(
+        queryset=Machine.objects.filter(machine_status='Available'), 
+        required=False,
+        allow_null=True,
+        write_only=True
+    )
+    part = serializers.PrimaryKeyRelatedField(
+        queryset=Part.objects.filter(part_status='Available'), 
+        required=False,
+        allow_null=True,
+        write_only=True
+    )
+    accessory = serializers.PrimaryKeyRelatedField(
+        queryset=Accessory.objects.filter(acc_status='Available'), 
+        required=False,
+        allow_null=True,
+        write_only=True
+    )
+
+    machine_details = MachineSerializer(source='machine', read_only=True)
+    part_details = PartSerializer(source='part', read_only=True)
+    accessory_details = AccessorySerializer(source='accessory', read_only=True)
+    
+    class Meta:
+        model = TransferItem
+        fields = ['id', 'item_type', 'machine', 'part', 'accessory', 
+                  'machine_details', 'part_details', 'accessory_details',
+                 'quantity', 'initial_quantity']
+        read_only_fields = ['initial_quantity']
+
+    def validate(self, data):
+        item_type = data.get('item_type')
+        quantity = data.get('quantity', 1)
+        
+        if item_type == 'Part' and data.get('part'):
+            if quantity > data['part'].quantity:
+                raise serializers.ValidationError(
+                    f"Quantity exceeds available stock ({data['part'].quantity})"
+                )
+        
+        if item_type == 'Accessory' and data.get('accessory'):
+            if quantity > data['accessory'].quantity:
+                raise serializers.ValidationError(
+                    f"Quantity exceeds available stock ({data['accessory'].quantity})"
+                )
+        
+        return data
+
+class TransferSerializer(serializers.ModelSerializer):
+    items = TransferItemSerializer(many=True)
+    from_store = StoreSerializer(read_only=True)
+    to_store = StoreSerializer(read_only=True)
+    from_store_id = serializers.PrimaryKeyRelatedField(
+        queryset=Store.objects.all(), 
+        source='from_store',
+        write_only=True
+    )
+    to_store_id = serializers.PrimaryKeyRelatedField(
+        queryset=Store.objects.all(), 
+        source='to_store',
+        write_only=True
+    )
+    created_by = UserSerializer(read_only=True)
+
+    class Meta:
+        model = Transfer
+        fields = [
+            'id', 'from_store', 'to_store', 'from_store_id', 'to_store_id',
+            'created_by', 'created_at', 'updated_at', 'status', 'notes', 'items'
+        ]
+    
+    def create(self, validated_data):
+        items_data = validated_data.pop('items')
+        transfer = Transfer.objects.create(**validated_data)
+        
+        for item_data in items_data:
+            item_type = item_data['item_type']
+            initial_quantity = 0
+            
+            if item_type == 'Machine':
+                machine = item_data['machine']
+                initial_quantity = machine.quantity
+                item_data['machine'] = machine
+            elif item_type == 'Part':
+                part = item_data['part']
+                initial_quantity = part.quantity
+                item_data['part'] = part
+            elif item_type == 'Accessory':
+                accessory = item_data['accessory']
+                initial_quantity = accessory.quantity
+                item_data['accessory'] = accessory
+            
+            item_data['initial_quantity'] = initial_quantity
+            TransferItem.objects.create(transfer=transfer, **item_data)
+        
+        return transfer
+    
+    def update(self, instance, validated_data):
+        # Prevent updates to completed transfers
+        if instance.status == 'Completed':
+            raise serializers.ValidationError("Cannot modify completed transfers")
+        
+        # Update transfer fields
+        instance.from_store = validated_data.get('from_store', instance.from_store)
+        instance.to_store = validated_data.get('to_store', instance.to_store)
+        instance.notes = validated_data.get('notes', instance.notes)
+        instance.save()
+        
+        # Update items (if provided)
+        items_data = validated_data.get('items', [])
+        if items_data:
+            # Clear existing items and create new ones
+            instance.items.all().delete()
+            for item_data in items_data:
+                TransferItem.objects.create(transfer=instance, **item_data)
         
         return instance
