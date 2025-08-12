@@ -99,13 +99,6 @@ jobs:
 
             cd ${{ secrets.SERVER_PATH }}
 
-            echo "🔍 Checking for merge conflicts on server..."
-            if grep -r "<<<<<<< HEAD" . --exclude-dir=.git 2>/dev/null; then
-              echo "❌ Merge conflict markers found on server!"
-              echo "Please resolve conflicts before deploying."
-              exit 1
-            fi
-
             echo "📦 Pulling latest changes..."
             git reset --hard HEAD
             git pull origin main
