@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StoreInquiry
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StoreInquiry, Transfer, TransferItem
 from django.db.models import Sum
 from dateutil.relativedelta import relativedelta
 from django.utils import timezone
@@ -236,6 +236,7 @@ class MachineSerializer(serializers.ModelSerializer):
         write_only=True,
         required=True
     )
+    source_transfer = serializers.PrimaryKeyRelatedField(read_only=True)
     
     class Meta:
         model = Machine
@@ -251,12 +252,13 @@ class MachineSerializer(serializers.ModelSerializer):
             'created_at',
             'machine_condition',
             'color_type',
-            'store',  # Now included in fields list
+            'store',  
             'store_id',
             'store_name',
             'supplier_name',
             'machine_status',
-            'is_transfer'
+            'is_transfer',
+            'source_transfer'  
         ]
         extra_kwargs = {
             'created_at': {'read_only': True}
@@ -451,6 +453,10 @@ class PartSerializer(serializers.ModelSerializer):
     )
     leased_quantity = serializers.SerializerMethodField()
     sold_quantity = serializers.SerializerMethodField()
+    source_transfer = serializers.PrimaryKeyRelatedField(read_only=True)
+    transferred_quantity = serializers.ReadOnlyField()
+    received_quantity = serializers.ReadOnlyField()
+    transfer_history = serializers.ReadOnlyField()
     
     class Meta:
         model = Part
@@ -475,8 +481,10 @@ class PartSerializer(serializers.ModelSerializer):
             'is_transfer',
             'leased_quantity', 
             'sold_quantity',
+            'transferred_quantity', 'received_quantity', 'transfer_history',
             'lease_inquiries', 
-            'sold_items'
+            'sold_items',
+            'source_transfer'
         ]
         extra_kwargs = {
             'store': {'write_only': True},
@@ -552,6 +560,11 @@ class AccessorySerializer(serializers.ModelSerializer):
         source='leaseaccinquiry_set'
     )
     sold_items = serializers.SerializerMethodField()
+    source_transfer = serializers.PrimaryKeyRelatedField(read_only=True)
+    transferred_quantity = serializers.ReadOnlyField()
+    received_quantity = serializers.ReadOnlyField()
+    transfer_history = serializers.ReadOnlyField()
+
 
     class Meta:
         model = Accessory
@@ -564,7 +577,7 @@ class AccessorySerializer(serializers.ModelSerializer):
             'unit_value',
             'intial_quantity',
             'quantity',
-            'conditon_description',
+            'condition_description',
             'created_at',
             'acc_condition',
             'color_type',
@@ -577,7 +590,9 @@ class AccessorySerializer(serializers.ModelSerializer):
             'leased_quantity', 
             'sold_quantity',
             'lease_inquiries', 
-            'sold_items'
+             'transferred_quantity', 'received_quantity', 'transfer_history',
+            'sold_items',
+            'source_transfer'
         ]
         extra_kwargs = {
             'store': {'write_only': True},
@@ -1227,5 +1242,125 @@ class QuotationSerializer(serializers.ModelSerializer):
         for item in current_items:
             if item.id not in updated_items:
                 item.delete()
+        
+        return instance
+    
+class TransferItemSerializer(serializers.ModelSerializer):
+    # For write operations
+    machine = serializers.PrimaryKeyRelatedField(
+        queryset=Machine.objects.filter(machine_status='Available'), 
+        required=False,
+        allow_null=True,
+        write_only=True
+    )
+    part = serializers.PrimaryKeyRelatedField(
+        queryset=Part.objects.filter(part_status='Available'), 
+        required=False,
+        allow_null=True,
+        write_only=True
+    )
+    accessory = serializers.PrimaryKeyRelatedField(
+        queryset=Accessory.objects.filter(acc_status='Available'), 
+        required=False,
+        allow_null=True,
+        write_only=True
+    )
+
+    machine_details = MachineSerializer(source='machine', read_only=True)
+    part_details = PartSerializer(source='part', read_only=True)
+    accessory_details = AccessorySerializer(source='accessory', read_only=True)
+    
+    class Meta:
+        model = TransferItem
+        fields = ['id', 'item_type', 'machine', 'part', 'accessory', 
+                  'machine_details', 'part_details', 'accessory_details',
+                 'quantity', 'initial_quantity']
+        read_only_fields = ['initial_quantity']
+
+    def validate(self, data):
+        item_type = data.get('item_type')
+        quantity = data.get('quantity', 1)
+        
+        if item_type == 'Part' and data.get('part'):
+            if quantity > data['part'].quantity:
+                raise serializers.ValidationError(
+                    f"Quantity exceeds available stock ({data['part'].quantity})"
+                )
+        
+        if item_type == 'Accessory' and data.get('accessory'):
+            if quantity > data['accessory'].quantity:
+                raise serializers.ValidationError(
+                    f"Quantity exceeds available stock ({data['accessory'].quantity})"
+                )
+        
+        return data
+
+class TransferSerializer(serializers.ModelSerializer):
+    items = TransferItemSerializer(many=True)
+    from_store = StoreSerializer(read_only=True)
+    to_store = StoreSerializer(read_only=True)
+    from_store_id = serializers.PrimaryKeyRelatedField(
+        queryset=Store.objects.all(), 
+        source='from_store',
+        write_only=True
+    )
+    to_store_id = serializers.PrimaryKeyRelatedField(
+        queryset=Store.objects.all(), 
+        source='to_store',
+        write_only=True
+    )
+    created_by = UserSerializer(read_only=True)
+
+    class Meta:
+        model = Transfer
+        fields = [
+            'id', 'from_store', 'to_store', 'from_store_id', 'to_store_id',
+            'created_by', 'created_at', 'updated_at', 'status', 'notes', 'items'
+        ]
+    
+    def create(self, validated_data):
+        items_data = validated_data.pop('items')
+        transfer = Transfer.objects.create(**validated_data)
+        
+        for item_data in items_data:
+            item_type = item_data['item_type']
+            initial_quantity = 0
+            
+            if item_type == 'Machine':
+                machine = item_data['machine']
+                initial_quantity = machine.quantity
+                item_data['machine'] = machine
+            elif item_type == 'Part':
+                part = item_data['part']
+                initial_quantity = part.quantity
+                item_data['part'] = part
+            elif item_type == 'Accessory':
+                accessory = item_data['accessory']
+                initial_quantity = accessory.quantity
+                item_data['accessory'] = accessory
+            
+            item_data['initial_quantity'] = initial_quantity
+            TransferItem.objects.create(transfer=transfer, **item_data)
+        
+        return transfer
+    
+    def update(self, instance, validated_data):
+        # Prevent updates to completed transfers
+        if instance.status == 'Completed':
+            raise serializers.ValidationError("Cannot modify completed transfers")
+        
+        # Update transfer fields
+        instance.from_store = validated_data.get('from_store', instance.from_store)
+        instance.to_store = validated_data.get('to_store', instance.to_store)
+        instance.notes = validated_data.get('notes', instance.notes)
+        instance.save()
+        
+        # Update items (if provided)
+        items_data = validated_data.get('items', [])
+        if items_data:
+            # Clear existing items and create new ones
+            instance.items.all().delete()
+            for item_data in items_data:
+                TransferItem.objects.create(transfer=instance, **item_data)
         
         return instance

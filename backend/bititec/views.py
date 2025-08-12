@@ -12,8 +12,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
 
 from .middleware import SecurityUtils
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StoreInquiry
-from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, QuotationSerializer, SaleSerializer, StoreInquirySerializer, UserSerializer, RegisterSerializer, StoreSerializer
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StoreInquiry, Transfer, TransferItem
+from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, QuotationSerializer, SaleSerializer, StoreInquirySerializer, TransferSerializer, UserSerializer, RegisterSerializer, StoreSerializer
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.views import APIView
@@ -512,6 +512,21 @@ def post(self, request, *args, **kwargs):
         "message": "User created successfully",
     }, status=status.HTTP_201_CREATED)
 
+class IsDirectorOrSuperAdminOrTechnicianManager(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user_role = request.user.role.lower() if request.user.role else ''
+        return user_role in ['director', 'super admin', 'technician manager']
+
+class IsTechnicianOrAbove(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user_role = request.user.role.lower() if request.user.role else ''
+        return user_role in ['director', 'super admin', 'technician manager', 'technician']
+
+class IsInventoryManagerOrAbove(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user_role = request.user.role.lower() if request.user.role else ''
+        return user_role in ['director', 'super admin', 'inventory manager', 'sales manager']
+
 class StoreListCreate(generics.ListCreateAPIView):
     queryset = Store.objects.all()
     serializer_class = StoreSerializer
@@ -522,6 +537,38 @@ class StoreRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = StoreSerializer
     permission_classes = [permissions.IsAuthenticated]
     lookup_field = 'id'
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Override destroy method to prevent deletion of stores with inventory
+        """
+        instance = self.get_object()
+        
+        # Check if store has any inventory (machines, parts, accessories)
+        machines_count = instance.machines.count()
+        parts_count = instance.parts.count()
+        accessories_count = instance.accessories.count()
+        
+        if machines_count > 0 or parts_count > 0 or accessories_count > 0:
+            error_message = f"Cannot delete store '{instance.store_name}'. Store contains "
+            inventory_items = []
+            
+            if machines_count > 0:
+                inventory_items.append(f"{machines_count} machine(s)")
+            if parts_count > 0:
+                inventory_items.append(f"{parts_count} part(s)")
+            if accessories_count > 0:
+                inventory_items.append(f"{accessories_count} accessory(ies)")
+                
+            error_message += ", ".join(inventory_items) + ". Please remove all inventory items before deleting the store."
+            
+            return Response(
+                {"error": error_message},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # If no inventory, proceed with deletion
+        return super().destroy(request, *args, **kwargs)
 
 class AccessoryTypeListCreate(generics.ListCreateAPIView):
     queryset = AccessoryType.objects.all()
@@ -656,7 +703,6 @@ class PartViewSet(viewsets.ModelViewSet):
 
         return queryset.order_by('-created_at')
     
-
 class AccessoryViewSet(viewsets.ModelViewSet):
     serializer_class = AccessorySerializer  
     permission_classes = [permissions.IsAuthenticated]
@@ -796,10 +842,40 @@ class StoreInquiryViewSet(viewsets.ModelViewSet):
             return StoreInquiry.objects.filter(service_call=service_call)
         return StoreInquiry.objects.all()
     
+    def get_permissions(self):
+        """
+        Override permissions based on action
+        """
+        if self.action in ['list', 'retrieve']:
+            # Allow all authenticated users to view store inquiries
+            permission_classes = [permissions.IsAuthenticated]
+        elif self.action in ['create']:
+            # Allow technicians and above to create inquiries
+            permission_classes = [permissions.IsAuthenticated, IsTechnicianOrAbove]
+        elif self.action in ['update', 'partial_update', 'destroy']:
+            # Restrict editing to inventory managers and above
+            permission_classes = [permissions.IsAuthenticated, IsInventoryManagerOrAbove]
+        else:
+            permission_classes = [permissions.IsAuthenticated]
+        
+        return [permission() for permission in permission_classes]
+    
     def update(self, request, *args, **kwargs):
+        # Check specific permissions for store inquiry updates
+        user = request.user
+        user_role = user.role.lower() if user.role else ''
+        allowed_roles = ['director', 'super admin', 'inventory manager', 'sales manager']
+        
+        if user_role not in allowed_roles:
+            return Response(
+                {'error': 'You do not have permission to update store inquiries'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         data = request.data.copy()
+        
         if 'unit_price' in data:
             try:
                 data['unit_price'] = Decimal(str(data['unit_price']))
@@ -809,7 +885,7 @@ class StoreInquiryViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer = self.get_serializer(instance, data=data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
         return Response(serializer.data)
@@ -850,20 +926,26 @@ class CallViewSet(viewsets.ModelViewSet):
             'item__store'
         ).prefetch_related('technician')
 
-        # Role-based filtering
+        # Role-based filtering for different actions
         user = self.request.user
         user_role = user.role.lower() if user.role else ''
         
         # Allow full access to these roles
         allowed_full_access_roles = ['director', 'super admin', 'technician manager']
         
-        if user_role not in allowed_full_access_roles:
-            # If user is a technician, only show calls assigned to them
-            if user_role == 'technician':
-                queryset = queryset.filter(technician__id=user.id)
-            else:
-                # For other roles, show no calls or handle as needed
-                queryset = queryset.none()
+        # For GET requests (viewing), allow all authenticated users to see calls
+        if self.action in ['list', 'retrieve']:
+            # All authenticated users can view service calls
+            pass  # No filtering for view operations
+        else:
+            # For edit operations (POST, PUT, PATCH, DELETE), apply role restrictions
+            if user_role not in allowed_full_access_roles:
+                # If user is a technician, only show calls assigned to them for editing
+                if user_role == 'technician':
+                    queryset = queryset.filter(technician__id=user.id)
+                else:
+                    # For other roles, show no calls for editing or handle as needed
+                    queryset = queryset.none()
         
         # Status filtering
         if status:
@@ -881,7 +963,6 @@ class CallViewSet(viewsets.ModelViewSet):
          # Technician filtering
         if technician_id:
             queryset = queryset.filter(technician__id=technician_id)
-
 
         # Date range filtering
         if start_date and end_date:
@@ -903,9 +984,44 @@ class CallViewSet(viewsets.ModelViewSet):
 
         return queryset.order_by('-created_at')
     
+    def get_permissions(self):
+        """
+        Override permissions based on action
+        """
+        if self.action in ['list', 'retrieve']:
+            # Allow all authenticated users to view
+            permission_classes = [permissions.IsAuthenticated]
+        elif self.action in ['create', 'update', 'partial_update', 'destroy']:
+            # Restrict editing to specific roles
+            permission_classes = [permissions.IsAuthenticated, IsDirectorOrSuperAdminOrTechnicianManager]
+        else:
+            permission_classes = [permissions.IsAuthenticated]
+        
+        return [permission() for permission in permission_classes]
     
     def update(self, request, *args, **kwargs):
+        # Check if user has permission to edit this specific call
         instance = self.get_object()
+        user = request.user
+        user_role = user.role.lower() if user.role else ''
+        
+        allowed_full_access_roles = ['director', 'super admin', 'technician manager']
+        
+        # Check permissions for update
+        if user_role not in allowed_full_access_roles:
+            if user_role == 'technician':
+                # Technicians can only edit calls assigned to them
+                if not instance.technician.filter(id=user.id).exists():
+                    return Response(
+                        {'error': 'You can only edit service calls assigned to you'}, 
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+            else:
+                return Response(
+                    {'error': 'You do not have permission to edit service calls'}, 
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
         old_status = instance.status
 
         serializer = self.get_serializer(instance, data=request.data, partial=True)
@@ -933,6 +1049,18 @@ class CallViewSet(viewsets.ModelViewSet):
     def start_service(self, request, pk=None):
         """Start service call"""
         call = self.get_object()
+        
+        # Check permissions
+        user = request.user
+        user_role = user.role.lower() if user.role else ''
+        allowed_roles = ['director', 'super admin', 'technician manager', 'technician']
+        
+        if user_role not in allowed_roles:
+            return Response({'error': 'Permission denied'}, status=403)
+        
+        if user_role == 'technician' and not call.technician.filter(id=user.id).exists():
+            return Response({'error': 'You can only start calls assigned to you'}, status=403)
+        
         if call.status != 'Pending':
             return Response({'error': 'Service must be in Pending status to start'}, status=400)
         
@@ -947,6 +1075,18 @@ class CallViewSet(viewsets.ModelViewSet):
     def complete_service(self, request, pk=None):
         """Complete service call"""
         call = self.get_object()
+        
+        # Check permissions
+        user = request.user
+        user_role = user.role.lower() if user.role else ''
+        allowed_roles = ['director', 'super admin', 'technician manager', 'technician']
+        
+        if user_role not in allowed_roles:
+            return Response({'error': 'Permission denied'}, status=403)
+        
+        if user_role == 'technician' and not call.technician.filter(id=user.id).exists():
+            return Response({'error': 'You can only complete calls assigned to you'}, status=403)
+        
         if call.status != 'In Progress':
             return Response({'error': 'Service must be in progress to complete'}, status=400)
         
@@ -988,6 +1128,15 @@ class CallViewSet(viewsets.ModelViewSet):
         field = request.data.get('field')
         value = request.data.get('value')
         old_status = call.status
+        
+        # Check permissions for approval updates
+        user = request.user
+        user_role = user.role.lower() if user.role else ''
+        
+        if field == 'technician_manager_approval':
+            # Only managers and above can approve
+            if user_role not in ['director', 'super admin', 'technician manager']:
+                return Response({'error': 'Permission denied for manager approval'}, status=403)
         
         if field in ['technician_manager_approval', 'client_verification']:
             setattr(call, field, value)
@@ -1184,10 +1333,7 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
             
             # If no pagination, return all results
             serializer = self.get_serializer(queryset, many=True)
-            return Response({
-                'results': serializer.data,
-                'count': queryset.count()
-            })
+            return Response(serializer.data)
             
         except Exception as e:
             return Response(
@@ -1573,54 +1719,73 @@ class LeasePartInquiryViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         with transaction.atomic():
-            # Save the lease part inquiry
             instance = serializer.save()
+            part = instance.part
             
-            # Update the part inventory
-            if not instance.store_inquiry:
-                part = instance.part
-                if part.quantity >= instance.quantity:
-                    part.quantity -= instance.quantity
-                    part.save()
-                else:
-                    raise serializer.ValidationError(
-                        f"Insufficient stock. Only {part.quantity} units available."
-                    )
+            # Ensure sufficient stock
+            if part.quantity < instance.quantity:
+                raise serializer.ValidationError(
+                    f"Insufficient stock. Only {part.quantity} units available."
+                )
+            
+            # Update part inventory
+            part.quantity -= instance.quantity
+            part.save()
+            
+            # Update part status if needed
+            if part.quantity == 0:
+                part.part_status = 'Out of Stock'
+                part.save()
 
     def perform_update(self, serializer):
         with transaction.atomic():
             old_instance = self.get_object()
-            old_quantity = old_instance.quantity
+            new_data = serializer.validated_data
+            new_quantity = new_data.get('quantity', old_instance.quantity)
+            new_part = new_data.get('part', old_instance.part)
             
-            # Save the updated instance
-            instance = serializer.save()
-            
-            # Adjust inventory based on quantity change
-            part = instance.part
-            quantity_difference = instance.quantity - old_quantity
-            
-            if quantity_difference > 0:
-                # More parts needed - reduce inventory
-                if part.quantity >= quantity_difference:
-                    part.quantity -= quantity_difference
-                    part.save()
-                else:
-                    raise serializers.ValidationError(
-                        f"Insufficient stock for increase. Only {part.quantity} additional units available."
+            # Handle part change
+            if old_instance.part != new_part:
+                # Return original part to inventory
+                old_part = old_instance.part
+                old_part.quantity += old_instance.quantity
+                old_part.save()
+                
+                # Deduct from new part
+                if new_part.quantity < new_quantity:
+                    raise serializer.ValidationError(
+                        f"Insufficient stock for new part. Only {new_part.quantity} units available."
                     )
-            elif quantity_difference < 0:
-                # Fewer parts needed - restore inventory
-                part.quantity += abs(quantity_difference)
-                part.save()
+                new_part.quantity -= new_quantity
+                new_part.save()
+            else:
+                # Same part, adjust quantity difference
+                quantity_diff = new_quantity - old_instance.quantity
+                if quantity_diff > 0:  # Increasing quantity
+                    if old_instance.part.quantity < quantity_diff:
+                        raise serializer.ValidationError(
+                            f"Insufficient stock for increase. Only {old_instance.part.quantity} units available."
+                        )
+                    old_instance.part.quantity -= quantity_diff
+                    old_instance.part.save()
+                elif quantity_diff < 0:  # Decreasing quantity
+                    old_instance.part.quantity += abs(quantity_diff)
+                    old_instance.part.save()
+            
+            # Update the lease part inquiry
+            serializer.save()
 
     def perform_destroy(self, instance):
         with transaction.atomic():
-            # Restore inventory when deleting
+            # Return part to inventory
             part = instance.part
             part.quantity += instance.quantity
-            part.save()
             
-            # Delete the instance
+            # Update status if needed
+            if part.quantity > 0 and part.part_status == 'Out of Stock':
+                part.part_status = 'Available'
+            
+            part.save()
             instance.delete()
 
 class LeaseAccInquiryViewSet(viewsets.ModelViewSet):
@@ -1682,3 +1847,184 @@ class QuotationPDFView(APIView):
         if pisa_status.err:
             return HttpResponse('PDF generation error', status=500)
         return response
+    
+class TransferListCreate(generics.ListCreateAPIView):
+    serializer_class = TransferSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        store_id = self.request.query_params.get('store_id')
+        queryset = Transfer.objects.select_related(
+            'from_store', 'to_store', 'created_by'
+        ).prefetch_related(
+            Prefetch('items', queryset=TransferItem.objects.select_related(
+                'machine', 'part', 'accessory'
+            ).prefetch_related(
+                'machine__store',
+                'part__store',
+                'accessory__store'
+            ))
+        ).order_by('-created_at')
+        
+        if store_id:
+            return queryset.filter(
+                Q(from_store_id=store_id) | Q(to_store_id=store_id)
+            )
+        return queryset
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+class TransferRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Transfer.objects.all()
+    serializer_class = TransferSerializer
+    permission_classes = [IsAuthenticated]
+    lookup_field = 'pk'
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        
+        # Prevent updates to completed transfers
+        if instance.status == 'Completed':
+            return Response(
+                {'error': 'Cannot modify completed transfers'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        return super().update(request, *args, **kwargs)
+
+class CompleteTransferView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    queryset = Transfer.objects.all()
+    serializer_class = TransferSerializer
+    lookup_field = 'pk'
+
+    def post(self, request, pk):
+        transfer = self.get_object()
+        logger.info(f"Starting transfer completion for: {transfer.id}")
+        
+        if transfer.status != 'Pending':
+            logger.warning(f"Transfer {transfer.id} is not pending (status: {transfer.status})")
+            return Response(
+                {'error': 'Transfer is not in a pending state'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        try:
+            with transaction.atomic():
+                logger.info(f"Processing {transfer.items.count()} items")
+                for i, item in enumerate(transfer.items.all()):
+                    logger.info(f"Processing item {i+1}: {item.item_type} {item.id}")
+                    
+                    if item.item_type == 'Machine':
+                        self.process_machine(item, transfer)
+                    elif item.item_type == 'Part':
+                        self.process_part(item, transfer)
+                    elif item.item_type == 'Accessory':
+                        self.process_accessory(item, transfer)
+                
+                transfer.status = 'Completed'
+                transfer.save()
+                logger.info(f"Transfer {transfer.id} completed successfully")
+                
+            return Response({'status': 'Transfer completed successfully'})
+        
+        except Exception as e:
+            logger.exception(f"Failed to complete transfer {transfer.id}: {str(e)}")
+            return Response(
+                {'error': f'Failed to complete transfer: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def process_machine(self, item, transfer):
+        logger.info(f"Processing machine: {item.machine.id}")
+        machine = item.machine
+        
+        if machine.store != transfer.from_store:
+            logger.error(f"Machine store mismatch: {machine.store.id} vs {transfer.from_store.id}")
+            raise ValueError(f"Machine {machine.serial_no} is not in source store")
+        
+        if machine.machine_status != 'Available':
+            logger.error(f"Machine not available: {machine.machine_status}")
+            raise ValueError(f"Machine {machine.serial_no} is not available for transfer")
+        
+        logger.info(f"Moving machine {machine.id} to store {transfer.to_store.id}")
+        machine.store = transfer.to_store
+        machine.source_transfer = transfer
+        machine.save()
+
+    def process_part(self, item, transfer):
+        logger.info(f"Processing part: {item.part.id}")
+        part = item.part
+        
+        if part.part_status != 'Available':
+            logger.error(f"Part not available: {part.part_status}")
+            raise ValueError(f"Part {part.part_name} is not available for transfer")
+        
+        if part.quantity < item.quantity:
+            logger.error(f"Insufficient quantity: {part.quantity} < {item.quantity}")
+            raise ValueError(f"Insufficient quantity for part {part.part_name}")
+        
+        new_ref_no = f"{part.ref_no}-TR-{str(transfer.id)[:8]}"
+        logger.info(f"Creating new part in store {transfer.to_store.id} with ref {new_ref_no}")
+        
+        Part.objects.create(
+            ref_no=new_ref_no,
+            store=transfer.to_store,
+            part_name=part.part_name,
+            part_brand=part.part_brand,
+            part_type=part.part_type,
+            unit_value=part.unit_value,
+            intial_quantity=item.quantity,
+            quantity=item.quantity,
+            condition_description=part.condition_description,
+            part_condition=part.part_condition,
+            color_type=part.color_type,
+            supplier_name=part.supplier_name,
+            part_status='Available',
+            source_transfer=transfer
+        )
+        
+        logger.info(f"Deducting {item.quantity} from source part {part.id}")
+        part.quantity -= item.quantity
+        if part.quantity == 0:
+            part.part_status = 'Out of Stock'
+        part.save()
+
+    def process_accessory(self, item, transfer):
+        logger.info(f"Processing accessory: {item.accessory.id}")
+        accessory = item.accessory
+        
+        if accessory.acc_status != 'Available':
+            logger.error(f"Accessory not available: {accessory.acc_status}")
+            raise ValueError(f"Accessory {accessory.acc_name} is not available for transfer")
+        
+        if accessory.quantity < item.quantity:
+            logger.error(f"Insufficient quantity: {accessory.quantity} < {item.quantity}")
+            raise ValueError(f"Insufficient quantity for accessory {accessory.acc_name}")
+        
+        new_ref_no = f"{accessory.ref_no}-TR-{str(transfer.id)[:8]}"
+        logger.info(f"Creating new accessory in store {transfer.to_store.id} with ref {new_ref_no}")
+        
+        Accessory.objects.create(
+            ref_no=new_ref_no,
+            store=transfer.to_store,
+            acc_name=accessory.acc_name,
+            acc_brand=accessory.acc_brand,
+            acc_type=accessory.acc_type,
+            unit_value=accessory.unit_value,
+            intial_quantity=item.quantity,
+            quantity=item.quantity,
+            condition_description=accessory.condition_description,
+            acc_condition=accessory.acc_condition,
+            color_type=accessory.color_type,
+            supplier_name=accessory.supplier_name,
+            acc_status='Available',
+            source_transfer=transfer
+        )
+        
+        logger.info(f"Deducting {item.quantity} from source accessory {accessory.id}")
+        accessory.quantity -= item.quantity
+        if accessory.quantity == 0:
+            accessory.acc_status = 'Out of Stock'
+        accessory.save()
