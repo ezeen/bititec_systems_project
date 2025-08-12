@@ -304,6 +304,7 @@ class Machine(models.Model):
     supplier_name = models.CharField(max_length=255)
     machine_status = models.CharField(max_length=20, choices=MACHINE_STATUS_CHOICES)
     is_transfer = models.BooleanField(default=False)
+    source_transfer = models.ForeignKey('Transfer', on_delete=models.SET_NULL, null=True, blank=True, related_name='transferred_machines')
 
     def __str__(self):
         return f"{self.machine_name} - {self.serial_no}"
@@ -349,6 +350,7 @@ class Part(models.Model):
     supplier_name = models.CharField(max_length=255)
     part_status = models.CharField(max_length=20, choices=PART_STATUS_CHOICES)
     is_transfer = models.BooleanField(default=False)
+    source_transfer = models.ForeignKey('Transfer', on_delete=models.SET_NULL, null=True, blank=True, related_name='transferred_parts')
 
     def __str__(self):
         return f"{self.part_name} - {self.ref_no}"
@@ -374,6 +376,95 @@ class Part(models.Model):
     def available_quantity(self):
         """Get the quantity available"""
         return self.intial_quantity - self.leased_quantity() - self.sold_quantity()
+    
+    @property
+    def transferred_quantity(self):
+        """Calculate total quantity transferred out from this part"""
+        return TransferItem.objects.filter(
+            part=self,
+            transfer__status='Completed',
+            transfer__from_store=self.store
+        ).aggregate(
+            total=models.Sum('quantity')
+        )['total'] or 0
+    
+    @property
+    def received_quantity(self):
+        """Calculate total quantity received through transfers"""
+        return TransferItem.objects.filter(
+            part__ref_no__startswith=self.ref_no.split('-TR-')[0],  # Original ref_no before transfer
+            transfer__status='Completed',
+            transfer__to_store=self.store
+        ).aggregate(
+            total=models.Sum('quantity')
+        )['total'] or 0
+    
+    @property
+    def transfer_history(self):
+        """Get all transfers involving this part"""
+        from django.db.models import Q
+        
+        # Get transfers where this part was transferred out
+        outgoing = TransferItem.objects.filter(
+            part=self,
+            transfer__from_store=self.store
+        ).select_related('transfer', 'transfer__from_store', 'transfer__to_store')
+        
+        # Get transfers where similar parts were transferred in (based on ref_no pattern)
+        incoming = TransferItem.objects.filter(
+            part__ref_no__startswith=self.ref_no.split('-TR-')[0],
+            transfer__to_store=self.store
+        ).select_related('transfer', 'transfer__from_store', 'transfer__to_store')
+        
+        history = []
+        
+        for item in outgoing:
+            history.append({
+                'id': f"out_{item.id}",
+                'transfer': {
+                    'id': str(item.transfer.id),
+                    'from_store': {
+                        'id': str(item.transfer.from_store.id),
+                        'store_name': item.transfer.from_store.store_name
+                    },
+                    'to_store': {
+                        'id': str(item.transfer.to_store.id),
+                        'store_name': item.transfer.to_store.store_name
+                    },
+                    'created_at': item.transfer.created_at.isoformat(),
+                    'status': item.transfer.status,
+                    'notes': item.transfer.notes
+                },
+                'quantity': item.quantity,
+                'transfer_type': 'outgoing',
+                'status': item.transfer.status
+            })
+            
+        for item in incoming:
+            history.append({
+                'id': f"in_{item.id}",
+                'transfer': {
+                    'id': str(item.transfer.id),
+                    'from_store': {
+                        'id': str(item.transfer.from_store.id),
+                        'store_name': item.transfer.from_store.store_name
+                    },
+                    'to_store': {
+                        'id': str(item.transfer.to_store.id),
+                        'store_name': item.transfer.to_store.store_name
+                    },
+                    'created_at': item.transfer.created_at.isoformat(),
+                    'status': item.transfer.status,
+                    'notes': item.transfer.notes
+                },
+                'quantity': item.quantity,
+                'transfer_type': 'incoming',
+                'status': item.transfer.status
+            })
+        
+        # Sort by created_at date
+        history.sort(key=lambda x: x['transfer']['created_at'], reverse=True)
+        return history
 
     class Meta:
         ordering = ['-created_at']
@@ -400,7 +491,7 @@ class Accessory(models.Model):
     unit_value = models.PositiveIntegerField()
     intial_quantity = models.PositiveIntegerField()
     quantity = models.PositiveIntegerField()
-    conditon_description = models.JSONField(default=list)
+    condition_description = models.JSONField(default=list)
     created_at = models.DateTimeField(default=timezone.now)
     acc_condition = models.CharField(max_length=20, choices=ACCESSORY_CONDITION_CHOICES)
     color_type = models.CharField(max_length=100)
@@ -408,6 +499,7 @@ class Accessory(models.Model):
     supplier_name = models.CharField(max_length=255)
     acc_status = models.CharField(max_length=20, choices=ACCESSORY_STATUS_CHOICES)
     is_transfer = models.BooleanField(default=False)
+    source_transfer = models.ForeignKey('Transfer', on_delete=models.SET_NULL, null=True, blank=True, related_name='transferred_accessories')
 
     def __str__(self):
         return f"{self.acc_name} - {self.ref_no}"
@@ -433,6 +525,95 @@ class Accessory(models.Model):
     def available_quantity(self):
         """Get the quantity available"""
         return self.intial_quantity - self.leased_quantity() - self.sold_quantity()
+    
+    @property
+    def transferred_quantity(self):
+        """Calculate total quantity transferred out from this accessory"""
+        return TransferItem.objects.filter(
+            accessory=self,
+            transfer__status='Completed',
+            transfer__from_store=self.store
+        ).aggregate(
+            total=models.Sum('quantity')
+        )['total'] or 0
+    
+    @property
+    def received_quantity(self):
+        """Calculate total quantity received through transfers"""
+        return TransferItem.objects.filter(
+            accessory__ref_no__startswith=self.ref_no.split('-TR-')[0],  # Original ref_no before transfer
+            transfer__status='Completed',
+            transfer__to_store=self.store
+        ).aggregate(
+            total=models.Sum('quantity')
+        )['total'] or 0
+    
+    @property
+    def transfer_history(self):
+        """Get all transfers involving this accessory"""
+        from django.db.models import Q
+        
+        # Get transfers where this accessory was transferred out
+        outgoing = TransferItem.objects.filter(
+            accessory=self,
+            transfer__from_store=self.store
+        ).select_related('transfer', 'transfer__from_store', 'transfer__to_store')
+        
+        # Get transfers where similar accessories were transferred in (based on ref_no pattern)
+        incoming = TransferItem.objects.filter(
+            accessory__ref_no__startswith=self.ref_no.split('-TR-')[0],
+            transfer__to_store=self.store
+        ).select_related('transfer', 'transfer__from_store', 'transfer__to_store')
+        
+        history = []
+        
+        for item in outgoing:
+            history.append({
+                'id': f"out_{item.id}",
+                'transfer': {
+                    'id': str(item.transfer.id),
+                    'from_store': {
+                        'id': str(item.transfer.from_store.id),
+                        'store_name': item.transfer.from_store.store_name
+                    },
+                    'to_store': {
+                        'id': str(item.transfer.to_store.id),
+                        'store_name': item.transfer.to_store.store_name
+                    },
+                    'created_at': item.transfer.created_at.isoformat(),
+                    'status': item.transfer.status,
+                    'notes': item.transfer.notes
+                },
+                'quantity': item.quantity,
+                'transfer_type': 'outgoing',
+                'status': item.transfer.status
+            })
+            
+        for item in incoming:
+            history.append({
+                'id': f"in_{item.id}",
+                'transfer': {
+                    'id': str(item.transfer.id),
+                    'from_store': {
+                        'id': str(item.transfer.from_store.id),
+                        'store_name': item.transfer.from_store.store_name
+                    },
+                    'to_store': {
+                        'id': str(item.transfer.to_store.id),
+                        'store_name': item.transfer.to_store.store_name
+                    },
+                    'created_at': item.transfer.created_at.isoformat(),
+                    'status': item.transfer.status,
+                    'notes': item.transfer.notes
+                },
+                'quantity': item.quantity,
+                'transfer_type': 'incoming',
+                'status': item.transfer.status
+            })
+        
+        # Sort by created_at date
+        history.sort(key=lambda x: x['transfer']['created_at'], reverse=True)
+        return history
 
     class Meta:
         ordering = ['-created_at']
@@ -907,3 +1088,35 @@ class QuotationItem(models.Model):
     def save(self, *args, **kwargs):
         self.total_price = self.quantity * self.unit_price
         super().save(*args, **kwargs)
+
+class Transfer(models.Model):
+    STATUS_CHOICES = [
+        ('Pending', 'Pending'),
+        ('Completed', 'Completed'),
+        ('Cancelled', 'Cancelled'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    from_store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name='outgoing_transfers')
+    to_store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name='incoming_transfers')
+    created_by = models.ForeignKey(CustomUser, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
+    notes = models.TextField(blank=True, null=True)
+
+class TransferItem(models.Model):
+    ITEM_TYPE_CHOICES = [
+        ('Machine', 'Machine'),
+        ('Part', 'Part'),
+        ('Accessory', 'Accessory'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    transfer = models.ForeignKey(Transfer, on_delete=models.CASCADE, related_name='items')
+    item_type = models.CharField(max_length=20, choices=ITEM_TYPE_CHOICES)
+    machine = models.ForeignKey(Machine, on_delete=models.CASCADE, null=True, blank=True)
+    part = models.ForeignKey(Part, on_delete=models.CASCADE, null=True, blank=True)
+    accessory = models.ForeignKey(Accessory, on_delete=models.CASCADE, null=True, blank=True)
+    quantity = models.PositiveIntegerField(default=1)
+    initial_quantity = models.PositiveIntegerField(default=0)  # Original quantity at transfer time
