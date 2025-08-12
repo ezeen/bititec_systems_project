@@ -31,7 +31,7 @@ jobs:
           --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -70,42 +70,9 @@ jobs:
           python manage.py migrate
           python manage.py test
 
-  # Add a pre-deployment check for merge conflicts
-  check-conflicts:
-    name: Check for merge conflicts
-    runs-on: ubuntu-latest
-    needs: test
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Fetch full history
-
-      - name: Check for merge conflict markers
-        run: |
-          echo "🔍 Checking for merge conflict markers..."
-          
-          # Check for conflict markers in the codebase
-          if grep -r "<<<<<<< HEAD" . --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.github; then
-            echo "❌ Found '<<<<<<< HEAD' conflict markers!"
-            exit 1
-          fi
-          
-          if grep -r "=======" . --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.github; then
-            echo "❌ Found '=======' conflict markers!"
-            exit 1
-          fi
-          
-          if grep -r ">>>>>>>" . --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.github; then
-            echo "❌ Found '>>>>>>>' conflict markers!"
-            exit 1
-          fi
-          
-          echo "✅ No merge conflict markers found!"
-
   deploy:
     name: Deploy to Production Server
-    needs: [test, check-conflicts]
+    needs: test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
@@ -139,25 +106,9 @@ jobs:
               exit 1
             fi
 
-            echo "📦 Pulling latest changes with conflict detection..."
-            
-            # Create backup before pulling
-            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-            mkdir -p ../backups
-            cp -r . ../backups/backup_${TIMESTAMP} || echo "⚠️ Backup failed"
-            
-            # Reset any local changes and pull
-            git fetch origin
-            git reset --hard origin/main
-            
-            # Double-check no conflicts were introduced
-            if grep -r "<<<<<<< HEAD" . --exclude-dir=.git 2>/dev/null; then
-              echo "❌ Merge conflicts detected after git pull!"
-              echo "Restoring from backup..."
-              rm -rf *
-              cp -r ../backups/backup_${TIMESTAMP}/* .
-              exit 1
-            fi
+            echo "📦 Pulling latest changes..."
+            git reset --hard HEAD
+            git pull origin main
 
             echo "📁 Syncing backend files..."
             mkdir -p bititecsystems/backend
@@ -211,13 +162,10 @@ jobs:
               exit 1
             fi
 
-            echo "🧹 Cleaning old backups..."
+            echo "🧹 Cleaning backups..."
             cd ../bititecsystems
             ls -t backend_backup_* 2>/dev/null | tail -n +4 | xargs rm -rf || true
             ls -t emailserver_backup_* 2>/dev/null | tail -n +4 | xargs rm -rf || true
-            
-            # Clean deployment backups older than 7 days
-            find ../backups -name "backup_*" -type d -mtime +7 -exec rm -rf {} + || true
 
             echo "✅ Deployment finished!"
           EOF
