@@ -284,6 +284,7 @@ class Machine(models.Model):
     
     MACHINE_STATUS_CHOICES = [
         ('Available', 'Available'),
+        ('Maintenance', 'Maintenance'),
         ('Leased', 'Leased'),
         ('Out of Stock', 'Out of Stock'),
         ('Sold', 'Sold'),
