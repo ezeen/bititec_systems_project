@@ -609,6 +609,30 @@ class MachineViewSet(viewsets.ModelViewSet):
     serializer_class = MachineSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardPagination
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        
+        # If expanding parts, include their store data
+        expand = request.query_params.get('expand', '')
+        if 'donated_parts' in expand or 'installed_parts' in expand:
+            data = serializer.data
+            if 'donated_parts' in expand:
+                data['donated_parts'] = PartSerializer(
+                    instance.donated_parts.all(),
+                    many=True,
+                    context={'request': request}
+                ).data
+            if 'installed_parts' in expand:
+                data['installed_parts'] = PartSerializer(
+                    instance.installed_parts.all(),
+                    many=True,
+                    context={'request': request}
+                ).data
+            return Response(data)
+    
+        return Response(serializer.data)
     
     def get_queryset(self):
         store_id = self.request.query_params.get('store')
@@ -1380,16 +1404,13 @@ class SaleViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        queryset = Sale.objects.annotate(
-            total_price=Sum('items__total_price'),
-            items_count=Count('items')
-        ).select_related('client').prefetch_related(
+        queryset = Sale.objects.select_related('client').prefetch_related(
             'items__machine',
             'items__part',
             'items__accessory'
         )
         
-        # Now apply filters
+        # Apply filters
         client_id = self.request.query_params.get('client')
         client_name = self.request.query_params.get('client_name')
         sale_type = self.request.query_params.get('type')
@@ -1407,40 +1428,92 @@ class SaleViewSet(viewsets.ModelViewSet):
             
         return queryset.order_by('-created_at')
     
-    def update(self, request, *args, **kwargs):
-        partial = kwargs.pop('partial', True)  # Allow partial updates
-        instance = self.get_object()
-        serializer = self.get_serializer(
-            instance, 
-            data=request.data, 
-            partial=partial
-        )
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        """Create sale with proper VAT calculations"""
+        print("=== SALE CREATION DEBUG ===")
+        print("Request data:", request.data)
+        
+        serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
+        
+        print("Validated data:", serializer.validated_data)
+        
+        # Create the sale
+        sale = serializer.save()
+        
+        print(f"Created sale totals:")
+        print(f"- Subtotal (VAT-exclusive): {sale.subtotal}")
+        print(f"- VAT Total: {sale.vat_total}")
+        print(f"- Total Amount: {sale.total_amount}")
+        print(f"- Add VAT: {sale.add_vat}")
+        print(f"- VAT Rate: {sale.vat_rate}")
+        
+        # Print item details for debugging
+        for item in sale.items.all():
+            print(f"Item: {item.sale_type} - Unit Price: {item.unit_price}, Qty: {item.quantity}")
+            print(f"  - Subtotal: {item.subtotal}")
+            print(f"  - VAT Amount: {item.vat_amount}")
+            print(f"  - Total Price: {item.total_price}")
+        
+        # Return the sale with calculated totals
+        response_serializer = self.get_serializer(sale)
+        headers = self.get_success_headers(response_serializer.data)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+    
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        """Update sale and recalculate VAT"""
+        partial = kwargs.pop('partial', True)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        
+        # Save the sale
+        sale = serializer.save()
+        
+        # Recalculate totals after update
+        sale.calculate_totals()
+        sale.save()
+        
+        print("=== SALE UPDATE DEBUG ===")
+        print(f"Updated sale totals:")
+        print(f"- Subtotal (VAT-exclusive): {sale.subtotal}")
+        print(f"- VAT Total: {sale.vat_total}")
+        print(f"- Total Amount: {sale.total_amount}")
+        
         return Response(serializer.data)
     
     def perform_destroy(self, instance):
-        # Return items to store before deleting sale
-        for item in instance.items.all():
-            if item.machine:
-                machine = item.machine
-                machine.machine_status = 'Available'
-                machine.save()
-            elif item.part:
-                part = item.part
-                part.quantity += item.quantity
-                if part.quantity > 0 and part.part_status == 'Out of Stock':
-                    part.part_status = 'Available'
-                part.save()
-            elif item.accessory:
-                accessory = item.accessory
-                accessory.quantity += item.quantity
-                if accessory.quantity > 0 and accessory.acc_status == 'Out of Stock':
-                    accessory.acc_status = 'Available'
-                accessory.save()
-        
-        # Delete the sale
-        instance.delete()
+        """Return items to store before deleting sale"""
+        with transaction.atomic():
+            
+            # Return items to store
+            for item in instance.items.all():
+                
+                if item.machine:
+                    machine = item.machine
+                    machine.machine_status = 'Available'
+                    machine.save()
+                    
+                elif item.part:
+                    part = item.part
+                    old_quantity = part.quantity
+                    part.quantity += item.quantity
+                    if part.quantity > 0 and part.part_status == 'Out of Stock':
+                        part.part_status = 'Available'
+                    part.save()
+                    
+                elif item.accessory:
+                    accessory = item.accessory
+                    old_quantity = accessory.quantity
+                    accessory.quantity += item.quantity
+                    if accessory.quantity > 0 and accessory.acc_status == 'Out of Stock':
+                        accessory.acc_status = 'Available'
+                    accessory.save()
+                    
+            # Delete the sale
+            instance.delete()
     
 class DeliveryViewSet(viewsets.ModelViewSet):
     queryset = Delivery.objects.all()
@@ -2028,3 +2101,40 @@ class CompleteTransferView(generics.GenericAPIView):
         if accessory.quantity == 0:
             accessory.acc_status = 'Out of Stock'
         accessory.save()
+
+class PartMovementView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, machine_id, part_id):
+        machine = get_object_or_404(Machine, pk=machine_id)
+        part = get_object_or_404(Part, pk=part_id)
+
+        # Validate part belongs to this machine
+        if part.origin_machine != machine:
+            return Response(
+                {"error": "Part not originally from this machine"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Update part status
+        part.current_machine = None
+        part.installed_date = None
+        part.part_status = 'Available'
+        part.save()
+
+        return Response({"status": "Part removed successfully"})
+
+class PartInstallationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, machine_id, part_id):
+        machine = get_object_or_404(Machine, pk=machine_id)
+        part = get_object_or_404(Part, pk=part_id)
+
+        # Update part status
+        part.current_machine = machine
+        part.installed_date = timezone.now().date()
+        part.part_status = 'Installed'
+        part.save()
+
+        return Response({"status": "Part installed successfully"})

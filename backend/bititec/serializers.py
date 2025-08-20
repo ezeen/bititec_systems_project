@@ -237,28 +237,15 @@ class MachineSerializer(serializers.ModelSerializer):
         required=True
     )
     source_transfer = serializers.PrimaryKeyRelatedField(read_only=True)
+    donated_parts = serializers.SerializerMethodField()
+    installed_parts = serializers.SerializerMethodField()
     
     class Meta:
         model = Machine
         fields = [
-            'id',
-            'machine_name',
-            'machine_brand',
-            'machine_type',
-            'serial_no',
-            'unit_value',
-            'quantity',
-            'condition_description',
-            'created_at',
-            'machine_condition',
-            'color_type',
-            'store',  
-            'store_id',
-            'store_name',
-            'supplier_name',
-            'machine_status',
-            'is_transfer',
-            'source_transfer'  
+            'id', 'machine_name', 'machine_brand', 'machine_type', 'serial_no', 'unit_value',
+            'quantity', 'condition_description', 'created_at', 'machine_condition', 'color_type',
+            'store',  'store_id', 'store_name', 'supplier_name', 'machine_status', 'is_transfer', 'source_transfer', 'donated_parts', 'installed_parts'  
         ]
         extra_kwargs = {
             'created_at': {'read_only': True}
@@ -278,6 +265,14 @@ class MachineSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         instance.save()
         return instance
+    
+    def get_donated_parts(self, obj):
+        parts = Part.objects.filter(origin_machine=obj)
+        return PartSerializer(parts, many=True).data
+
+    def get_installed_parts(self, obj):
+        parts = Part.objects.filter(current_machine=obj)
+        return PartSerializer(parts, many=True).data
 
 class ClientSerializer(serializers.ModelSerializer):
     class Meta:
@@ -286,14 +281,18 @@ class ClientSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at']
     
 class BasicPartSerializer(serializers.ModelSerializer):
+    store_name = serializers.CharField(source='store.store_name', read_only=True)
+    store_id = serializers.UUIDField(source='store.id', read_only=True)
     class Meta:
         model = Part
-        fields = ['id', 'part_name', 'ref_no']  
+        fields = ['id', 'part_name', 'ref_no', 'store_name', 'store_id']  
 
 class BasicAccessorySerializer(serializers.ModelSerializer):
+    store_name = serializers.CharField(source='store.store_name', read_only=True)
+    store_id = serializers.UUIDField(source='store.id', read_only=True)
     class Meta:
         model = Accessory
-        fields = ['id', 'acc_name', 'ref_no']  
+        fields = ['id', 'acc_name', 'ref_no', 'store_name', 'store_id']  
 
 class MeterReadingSerializer(serializers.ModelSerializer):
     class Meta:
@@ -427,18 +426,24 @@ class LeasePartInquirySerializer(serializers.ModelSerializer):
         source='store_inquiry',
         required=False,
     )
+
+    subtotal = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    vat_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    total_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     
     class Meta:
         model = LeasePartInquiry
         fields = [
-            'id', 'lease', 'part', 'quantity', 'amount', 
-            'vat', 'date', 'is_paid', 'created_at', 'updated_at',
-            'part_id', 'lease_id', 'store_inquiry_id'
+            'id', 'lease', 'part', 'quantity', 'unit_amount', 'subtotal',
+            'vat_rate', 'vat_amount', 'total_amount', 'apply_vat', 'date', 
+            'is_paid', 'created_at', 'updated_at', 'part_id', 'lease_id', 
+            'store_inquiry_id'
         ]
-        read_only_fields = ['created_at', 'updated_at', 'store_inquiry']
+        read_only_fields = ['created_at', 'updated_at', 'subtotal', 'vat_amount', 'total_amount']
 
 class PartSerializer(serializers.ModelSerializer):
-    store_name = serializers.CharField(source='store.store_name', read_only=True)
+    store_name = serializers.CharField(source='store.storeName', read_only=True)
+    store_location = serializers.CharField(source='store.storeLocation', read_only=True)
     store_id = serializers.UUIDField(source='store.id', read_only=True)
     store = serializers.PrimaryKeyRelatedField(
         queryset=Store.objects.all(),
@@ -457,34 +462,30 @@ class PartSerializer(serializers.ModelSerializer):
     transferred_quantity = serializers.ReadOnlyField()
     received_quantity = serializers.ReadOnlyField()
     transfer_history = serializers.ReadOnlyField()
+    origin_machine = serializers.SerializerMethodField()
+    current_machine = serializers.SerializerMethodField()
+    origin_machine_id = serializers.PrimaryKeyRelatedField(
+        queryset=Machine.objects.all(),
+        source='origin_machine',
+        write_only=True,
+        required=False,
+        allow_null=True
+    )
+    current_machine_id = serializers.PrimaryKeyRelatedField(
+        queryset=Machine.objects.all(),
+        source='current_machine',
+        write_only=True,
+        required=False,
+        allow_null=True
+    )
     
     class Meta:
         model = Part
         fields = [
-            'id',
-            'part_name',
-            'part_brand',
-            'part_type',
-            'ref_no',
-            'unit_value',
-            'intial_quantity',
-            'quantity',
-            'condition_description',
-            'created_at',
-            'part_condition',
-            'color_type',
-            'store',
-            'store_id',
-            'store_name',
-            'supplier_name',
-            'part_status',
-            'is_transfer',
-            'leased_quantity', 
-            'sold_quantity',
-            'transferred_quantity', 'received_quantity', 'transfer_history',
-            'lease_inquiries', 
-            'sold_items',
-            'source_transfer'
+            'id', 'part_name', 'part_brand', 'part_type', 'ref_no', 'unit_value', 'intial_quantity', 'quantity', 'condition_description', 
+            'created_at', 'part_condition', 'color_type', 'store', 'store_id', 'store_name', 'supplier_name', 'part_status', 'is_transfer', 
+            'leased_quantity', 'sold_quantity', 'transferred_quantity', 'received_quantity', 'transfer_history', 'lease_inquiries', 'sold_items', 
+            'source_transfer', 'origin_machine', 'current_machine', 'origin_machine_id', 'current_machine_id', 'removed_date', 'installed_date', 'store_location', 
         ]
         extra_kwargs = {
             'store': {'write_only': True},
@@ -533,6 +534,24 @@ class PartSerializer(serializers.ModelSerializer):
                 } if item.sale else None  # Handle case where sale is None (though unlikely)
             }
         } for item in sale_items if item.sale]
+    
+    def get_origin_machine(self, obj):
+        if obj.origin_machine:
+            return {
+                'id': str(obj.origin_machine.id),
+                'serial_no': obj.origin_machine.serial_no,
+                'name': obj.origin_machine.machine_name
+            }
+        return None
+
+    def get_current_machine(self, obj):
+        if obj.current_machine:
+            return {
+                'id': str(obj.current_machine.id),
+                'serial_no': obj.current_machine.serial_no,
+                'name': obj.current_machine.machine_name
+            }
+        return None
         
 class LeaseAccInquirySerializer(serializers.ModelSerializer):
     accessory = BasicAccessorySerializer(read_only=True)
@@ -898,7 +917,9 @@ class SaleItemSerializer(serializers.ModelSerializer):
     machine = MachineSerializer(read_only=True)
     part = PartSerializer(read_only=True)
     accessory = AccessorySerializer(read_only=True)
-    total_price = serializers.SerializerMethodField()
+    subtotal = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    vat_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    total_price = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     custom_item = serializers.JSONField(required=False, allow_null=True)
     
     machine_id = serializers.PrimaryKeyRelatedField(
@@ -923,23 +944,31 @@ class SaleItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = SaleItem
         fields = [
-            'id', 'sale_type', 'machine', 'part', 'accessory',
+            'id', 'sale_type', 'machine', 'part', 'accessory', 
             'machine_id', 'part_id', 'accessory_id',
-            'quantity', 'unit_price', 'total_price', 'custom_item'
+            'quantity', 'unit_price', 'subtotal', 'vat_amount', 'total_price', 
+            'custom_item'
         ]
-    
-    def get_total_price(self, obj):
-        return obj.quantity * obj.unit_price
+        read_only_fields = ['subtotal', 'vat_amount', 'total_price']
+
+    def validate_quantity(self, value):
+        if value < 1:
+            raise serializers.ValidationError("Quantity must be at least 1.")
+        return value
 
 class SaleSerializer(serializers.ModelSerializer):
     sale_type = serializers.ChoiceField(choices=Sale.SALE_TYPE_CHOICES)
     client_name = serializers.CharField(write_only=True, required=False)
     client_location = serializers.CharField(write_only=True, required=False)
     items = SaleItemSerializer(many=True, required=True)
-    total_price = serializers.SerializerMethodField()
+    
+    # Read-only calculated fields
+    subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    vat_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     items_count = serializers.SerializerMethodField()
-    add_vat = serializers.BooleanField()
     client = serializers.SerializerMethodField()
+    
     client_id = serializers.PrimaryKeyRelatedField(
         queryset=Client.objects.all(),
         write_only=True,
@@ -950,14 +979,12 @@ class SaleSerializer(serializers.ModelSerializer):
     class Meta:
         model = Sale
         fields = [
-            'id', 'sale_no', 'client', 'client_id', 'items', 'add_vat', 'client_name', 'client_location',
-            'sale_date', 'notes', 'created_at', 'total_price', 'items_count', 'sale_type', 'client_id', 
+            'id', 'sale_no', 'client', 'client_id', 'items', 'add_vat', 'vat_rate',
+            'client_name', 'client_location', 'sale_date', 'notes', 'created_at',
+            'subtotal', 'vat_total', 'total_amount', 'items_count', 'sale_type'
         ]
-        read_only_fields = ['sale_no', 'created_at', 'total_price']
-        extra_kwargs = {
-            'local_client_name': {'required': False}
-        }
-    
+        read_only_fields = ['sale_no', 'created_at', 'subtotal', 'vat_total', 'total_amount']
+
     def get_client(self, obj):
         if obj.client:
             return {
@@ -968,19 +995,23 @@ class SaleSerializer(serializers.ModelSerializer):
         elif obj.local_client_name:
             return {
                 'client_name': obj.local_client_name,
-                'client_location': obj.local_client_location or ''
+                'client_location': getattr(obj, 'local_client_location', '')
             }
         return None
     
+    def get_items_count(self, obj):
+        return obj.items.count()
+
     def validate(self, data):
         sale_type = data.get('sale_type')
         client = data.get('client')  
         client_name = data.get('client_name')
         client_location = data.get('client_location')
+        items = data.get('items', [])
 
-        # For Internal Sales: Require existing client (via client_id)
+        # For Internal Sales: Require existing client
         if sale_type == 'Internal':
-            if not client:  # Changed this condition
+            if not client:
                 raise serializers.ValidationError({
                     "client_id": "Client selection is required for internal sales."
                 })
@@ -996,12 +1027,6 @@ class SaleSerializer(serializers.ModelSerializer):
 
         return data
 
-    def get_total_price(self, obj):
-        return sum(item.total_price for item in obj.items.all())
-    
-    def get_items_count(self, obj):
-        return obj.items.count()
-
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         sale_type = validated_data.get('sale_type')
@@ -1012,7 +1037,7 @@ class SaleSerializer(serializers.ModelSerializer):
             if not client:
                 raise serializers.ValidationError({"client_id": "Client selection is required for internal sales."})
             
-        elif sale_type == 'Local'and not client:
+        elif sale_type == 'Local' and not client:
             # Create or get client using name + location
             client_name = validated_data.pop('client_name')
             client_location = validated_data.pop('client_location', '')
@@ -1024,10 +1049,10 @@ class SaleSerializer(serializers.ModelSerializer):
             )
             validated_data['client'] = client
 
-        # Create the sale
+        # Create the sale (without calculating totals yet)
         sale = Sale.objects.create(**validated_data)
 
-        # Add sale items
+        # Add sale items (this will trigger inventory updates)
         for item_data in items_data:
             custom_data = {}
             if item_data.get('custom_item'):
@@ -1037,16 +1062,30 @@ class SaleSerializer(serializers.ModelSerializer):
                     'reference_no': item_data['custom_item'].get('reference_no', '')
                 }
             
-            SaleItem.objects.create(
-                sale=sale,
-                sale_type=item_data['sale_type'],
-                quantity=item_data['quantity'],
-                unit_price=item_data['unit_price'],
-                custom_item=custom_data if custom_data else None,
-                **({'machine': item_data.get('machine')} if item_data.get('machine') else {}),
-                **({'part': item_data.get('part')} if item_data.get('part') else {}),
-                **({'accessory': item_data.get('accessory')} if item_data.get('accessory') else {})
-            )
+            # Prepare item creation data
+            item_create_data = {
+                'sale': sale,
+                'sale_type': item_data['sale_type'],
+                'quantity': item_data['quantity'],
+                'unit_price': item_data['unit_price'],  # This should be VAT-exclusive from frontend
+                'custom_item': custom_data if custom_data else None,
+            }
+            
+            # Add specific item reference
+            if item_data.get('machine'):
+                item_create_data['machine'] = item_data['machine']
+            elif item_data.get('part'):
+                item_create_data['part'] = item_data['part']
+            elif item_data.get('accessory'):
+                item_create_data['accessory'] = item_data['accessory']
+            
+            # Create the item (this will handle inventory updates)
+            SaleItem.objects.create(**item_create_data)
+        
+        # Now calculate totals for the entire sale
+        sale.calculate_totals()
+        sale.save()
+        
         return sale
     
     def update(self, instance, validated_data):

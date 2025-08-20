@@ -64,7 +64,7 @@ urlpatterns = [
     path('lease-part-inquiries/', views.LeasePartInquiryViewSet.as_view({'get': 'list', 'post': 'create'})),
     path('lease-part-inquiries/<uuid:pk>/', views.LeasePartInquiryViewSet.as_view({'get': 'retrieve', 'put': 'update', 'patch': 'update', 'delete': 'destroy'})),
     path('lease-acc-inquiries/', views.LeaseAccInquiryViewSet.as_view({'get': 'list', 'post': 'create'})),
-    path('lease-acc-inquiries/<uuid:pk>/', views.LeaseAccInquiryViewSet.as_view({'get': 'retrieve', 'put': 'update', 'delete': 'destroy'})),
+    path('lease-acc-inquiries/<uuid:pk>/', views.LeaseAccInquiryViewSet.as_view({'get': 'retrieve', 'put': 'update', 'patch': 'update', 'delete': 'destroy'})),
     path('meter-readings/', views.MeterReadingViewSet.as_view({'get': 'list', 'post': 'create'})),
     path('meter-readings/<uuid:pk>/', views.MeterReadingViewSet.as_view({'get': 'retrieve', 'put': 'update', 'delete': 'destroy'})),
     path('leases/<uuid:pk>/meter-readings/', views.LeaseContractViewSet.as_view({'get': 'meter_readings'})),
@@ -74,4 +74,6 @@ urlpatterns = [
     path('transfers/', views.TransferListCreate.as_view(), name='transfer-list'),
     path('transfers/<uuid:pk>/', views.TransferRetrieveUpdateDestroy.as_view(), name='transfer-detail'),
     path('transfers/<uuid:pk>/complete/', views.CompleteTransferView.as_view(), name='complete-transfer'),
+    path('machines/<uuid:machine_id>/parts/<uuid:part_id>/remove/',  views.PartMovementView.as_view(), name='remove-part'),
+    path('machines/<uuid:machine_id>/parts/<uuid:part_id>/install/', views.PartInstallationView.as_view(), name='install-part'),
 ]
