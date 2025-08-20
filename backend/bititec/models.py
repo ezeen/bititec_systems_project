@@ -1,8 +1,10 @@
+from decimal import Decimal
 import os
 import random
 from datetime import timedelta
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
+from django.forms import ValidationError
 from django.utils.translation import gettext_lazy as _
 import uuid
 from django.utils import timezone
@@ -352,6 +354,24 @@ class Part(models.Model):
     part_status = models.CharField(max_length=20, choices=PART_STATUS_CHOICES)
     is_transfer = models.BooleanField(default=False)
     source_transfer = models.ForeignKey('Transfer', on_delete=models.SET_NULL, null=True, blank=True, related_name='transferred_parts')
+    origin_machine = models.ForeignKey(
+        Machine,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='donated_parts',
+        help_text="Machine this part was originally removed from"
+    )
+    current_machine = models.ForeignKey(
+        Machine,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='installed_parts',
+        help_text="Machine this part is currently installed in"
+    )
+    removed_date = models.DateField(null=True, blank=True)
+    installed_date = models.DateField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.part_name} - {self.ref_no}"
@@ -799,28 +819,73 @@ class SaleItem(models.Model):
     part = models.ForeignKey(Part, on_delete=models.PROTECT, null=True, blank=True, related_name='sale_items')
     accessory = models.ForeignKey(Accessory, on_delete=models.PROTECT, null=True, blank=True, related_name='sale_accessories')
     quantity = models.PositiveIntegerField(default=1)
-    unit_price = models.PositiveIntegerField()
-    total_price = models.PositiveIntegerField()
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)  # VAT-exclusive unit price
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, editable=False)  # unit_price * quantity (VAT-exclusive)
+    vat_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # VAT amount for this item
+    total_price = models.DecimalField(max_digits=10, decimal_places=2, editable=False)  # subtotal + vat_amount
     custom_item = models.JSONField(null=True, blank=True)
 
+    def calculate_totals(self, apply_vat=False, vat_rate=0.16):
+        """Calculate subtotal, VAT, and total price - ONLY for calculations, doesn't save"""
+        # Subtotal is always VAT-exclusive: unit_price * quantity
+        calculated_subtotal = self.unit_price * self.quantity
+        
+        # VAT amount calculation
+        if apply_vat:
+            calculated_vat_amount = calculated_subtotal * Decimal(str(vat_rate))
+        else:
+            calculated_vat_amount = Decimal('0')
+            
+        # Total price
+        calculated_total_price = calculated_subtotal + calculated_vat_amount
+        
+        return calculated_subtotal, calculated_vat_amount, calculated_total_price
+
     def save(self, *args, **kwargs):
-        self.total_price = self.unit_price * self.quantity
+        # Validate quantity before saving
+        if self.quantity < 1:
+            raise ValidationError("Quantity must be at least 1.")
+        
+        # Check if this is a new instance (not an update)
+        is_new = self.pk is None
+        
+        # Calculate subtotal (VAT-exclusive)
+        self.subtotal = self.unit_price * self.quantity
+        
+        # Don't calculate VAT here - let the Sale model handle it
+        # Just ensure we have default values
+        if not hasattr(self, 'vat_amount') or self.vat_amount is None:
+            self.vat_amount = Decimal('0')
+        if not hasattr(self, 'total_price') or self.total_price is None:
+            self.total_price = self.subtotal
+        
+        # Check stock before saving (only for new instances)
+        if is_new:
+            if self.sale_type == 'Part' and self.part:
+                if self.part.quantity < self.quantity:
+                    raise ValidationError("Insufficient stock")
+            elif self.sale_type == 'Accessory' and self.accessory:
+                if self.accessory.quantity < self.quantity:
+                    raise ValidationError("Insufficient stock")
+        
+        # Save the sale item
         super().save(*args, **kwargs)
         
-        # Update inventory
-        if self.sale_type == 'Machine' and self.machine:
-            self.machine.machine_status = 'Sold'
-            self.machine.save()
-        elif self.sale_type == 'Part' and self.part:
-            self.part.quantity -= self.quantity
-            if self.part.quantity <= 0:
-                self.part.part_status = 'Out of Stock'
-            self.part.save()
-        elif self.sale_type == 'Accessory' and self.accessory:
-            self.accessory.quantity -= self.quantity
-            if self.accessory.quantity <= 0:
-                self.accessory.acc_status = 'Out of Stock'
-            self.accessory.save()
+        # Update inventory ONLY for new instances (prevent double deduction)
+        if is_new:
+            if self.sale_type == 'Machine' and self.machine:
+                self.machine.machine_status = 'Sold'
+                self.machine.save()
+            elif self.sale_type == 'Part' and self.part:
+                self.part.quantity -= self.quantity
+                if self.part.quantity <= 0:
+                    self.part.part_status = 'Out of Stock'
+                self.part.save()
+            elif self.sale_type == 'Accessory' and self.accessory:
+                self.accessory.quantity -= self.quantity
+                if self.accessory.quantity <= 0:
+                    self.accessory.acc_status = 'Out of Stock'
+                self.accessory.save()
 
 class Sale(models.Model):
     SALE_TYPE_CHOICES = [
@@ -838,7 +903,50 @@ class Sale(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     add_vat = models.BooleanField(default=False)
+    vat_rate = models.DecimalField(max_digits=5, decimal_places=4, default=0.16)  # Store VAT rate
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)  # Sum of all item subtotals (VAT-exclusive)
+    vat_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)  # Total VAT amount
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)  # Final total
     store_inquiry = models.ForeignKey(StoreInquiry, on_delete=models.SET_NULL, null=True, blank=True)
+
+    def calculate_totals(self):
+        """Recalculate all totals for this sale"""
+        # Reset totals
+        self.subtotal = Decimal('0')
+        self.vat_total = Decimal('0')
+        
+        # Calculate totals from all items
+        for item in self.items.all():
+            # Item subtotal is always VAT-exclusive (unit_price * quantity)
+            item_subtotal = item.unit_price * item.quantity
+            
+            # Calculate VAT for this item if VAT is enabled
+            if self.add_vat:
+                item_vat = item_subtotal * Decimal(str(self.vat_rate))
+            else:
+                item_vat = Decimal('0')
+            
+            # Calculate item total
+            item_total = item_subtotal + item_vat
+            
+            # Update item with calculated values
+            item.subtotal = item_subtotal
+            item.vat_amount = item_vat
+            item.total_price = item_total
+            
+            # Update the item in database with calculated values
+            SaleItem.objects.filter(id=item.id).update(
+                subtotal=item_subtotal,
+                vat_amount=item_vat,
+                total_price=item_total
+            )
+            
+            # Add to sale totals
+            self.subtotal += item_subtotal  # VAT-exclusive subtotal
+            self.vat_total += item_vat      # Total VAT amount
+        
+        # Final total including VAT
+        self.total_amount = self.subtotal + self.vat_total
 
     def save(self, *args, **kwargs):
         if not self.sale_no:
@@ -991,12 +1099,31 @@ class LeasePartInquiry(models.Model):
     store_inquiry = models.ForeignKey(StoreInquiry, on_delete=models.CASCADE, related_name='lease_part_inquiries', null=True, blank=True)
     part = models.ForeignKey(Part, on_delete=models.PROTECT)
     quantity = models.PositiveIntegerField()
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    vat = models.DecimalField(max_digits=10, decimal_places=2)
+    unit_amount = models.DecimalField(max_digits=10, decimal_places=2)  # Base unit amount without VAT
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, editable=False)  # unit_amount * quantity
+    vat_rate = models.DecimalField(max_digits=5, decimal_places=4, default=0.16)  # VAT rate as percentage
+    vat_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # VAT amount
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2, editable=False)  # Final total with VAT
+    apply_vat = models.BooleanField(default=False)
     date = models.DateField()
     is_paid = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def calculate_totals(self):
+        """Calculate subtotal, VAT, and total amount"""
+        self.subtotal = self.unit_amount * self.quantity
+        
+        if self.apply_vat:
+            self.vat_amount = self.subtotal * self.vat_rate
+        else:
+            self.vat_amount = Decimal('0')
+            
+        self.total_amount = self.subtotal + self.vat_amount
+
+    def save(self, *args, **kwargs):
+        self.calculate_totals()
+        super().save(*args, **kwargs)
 
     class Meta:
         ordering = ['-date']

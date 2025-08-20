@@ -156,21 +156,105 @@ class LeaseContractAdmin(admin.ModelAdmin):
     search_fields = ('lease_no', 'client__client_name', 'item__machine_name')
     readonly_fields = ('created_at', 'updated_at')
 
+# Updated SaleItem inline with VAT handling
+class SaleItemInline(admin.TabularInline):
+    model = SaleItem
+    extra = 1
+    fields = ('sale_type', 'machine', 'part', 'accessory', 'quantity', 'unit_price', 'subtotal', 'vat_amount', 'total_price')
+    readonly_fields = ('subtotal', 'vat_amount', 'total_price')
+    raw_id_fields = ('machine', 'part', 'accessory')
+
 @admin.register(Sale)
 class SaleAdmin(admin.ModelAdmin):
-    list_display = ('sale_no', 'client', 'sale_date',  'created_at')
-    list_filter = ('sale_date', 'client')
-    search_fields = ('sale_no', 'client__client_name')
-    readonly_fields = ('created_at', 'updated_at')
+    list_display = ('sale_no', 'client_display', 'sale_type', 'sale_date', 'subtotal', 'vat_total', 'total_amount', 'created_at')
+    list_filter = ('sale_type', 'sale_date', 'add_vat', 'client')
+    search_fields = ('sale_no', 'client__client_name', 'local_client_name')
+    readonly_fields = ('sale_no', 'subtotal', 'vat_total', 'total_amount', 'created_at', 'updated_at')
     date_hierarchy = 'sale_date'
-    raw_id_fields = ('client',)
+    raw_id_fields = ('client', 'store_inquiry')
+    inlines = [SaleItemInline]
+    
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('sale_no', 'sale_type', 'client', 'local_client_name', 'sale_date')
+        }),
+        ('VAT Configuration', {
+            'fields': ('add_vat', 'vat_rate'),
+            'description': 'Configure VAT settings for this sale'
+        }),
+        ('Financial Summary', {
+            'fields': ('subtotal', 'vat_total', 'total_amount'),
+            'classes': ('collapse',)
+        }),
+        ('Additional Information', {
+            'fields': ('notes', 'store_inquiry'),
+            'classes': ('collapse',)
+        }),
+        ('Metadata', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def client_display(self, obj):
+        if obj.client:
+            return obj.client.client_name
+        elif obj.local_client_name:
+            return f"{obj.local_client_name} (Local)"
+        return "Unknown Client"
+    client_display.short_description = 'Client'
+    
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        # Recalculate totals after saving
+        obj.calculate_totals()
+        obj.save()
+    
+    def save_formset(self, request, form, formset, change):
+        super().save_formset(request, form, formset, change)
+        # Recalculate totals after saving items
+        if formset.model == SaleItem:
+            form.instance.calculate_totals()
+            form.instance.save()
 
 @admin.register(SaleItem)
 class SaleItemAdmin(admin.ModelAdmin):
-    list_display = ('sale', 'sale_type', 'unit_price', 'quantity', 'total_price')
-    list_filter = ('sale_type',)
-    search_fields = ('sale__sale_no',)
-    raw_id_fields = ('machine', 'part', 'accessory')
+    list_display = ('sale', 'sale_type', 'get_item_name', 'quantity', 'unit_price', 'subtotal', 'vat_amount', 'total_price')
+    list_filter = ('sale_type', 'sale__add_vat')
+    search_fields = ('sale__sale_no', 'machine__machine_name', 'part__part_name', 'accessory__acc_name')
+    readonly_fields = ('subtotal', 'vat_amount', 'total_price')
+    raw_id_fields = ('sale', 'machine', 'part', 'accessory')
+    
+    fieldsets = (
+        ('Sale Information', {
+            'fields': ('sale', 'sale_type')
+        }),
+        ('Item Details', {
+            'fields': ('machine', 'part', 'accessory', 'custom_item')
+        }),
+        ('Pricing', {
+            'fields': ('quantity', 'unit_price', 'subtotal', 'vat_amount', 'total_price'),
+            'description': 'VAT is calculated based on the parent sale VAT settings'
+        }),
+    )
+    
+    def get_item_name(self, obj):
+        if obj.machine:
+            return obj.machine.machine_name
+        elif obj.part:
+            return obj.part.part_name
+        elif obj.accessory:
+            return obj.accessory.acc_name
+        elif obj.custom_item:
+            return obj.custom_item.get('name', 'Custom Item')
+        return 'Unknown Item'
+    get_item_name.short_description = 'Item Name'
+    
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        # Recalculate sale totals after saving item
+        obj.sale.calculate_totals()
+        obj.sale.save()
 
 @admin.register(Delivery)
 class DeliveryAdmin(admin.ModelAdmin):
@@ -200,11 +284,37 @@ class DeliveryAdmin(admin.ModelAdmin):
 
 @admin.register(LeasePartInquiry)
 class LeasePartInquiryAdmin(admin.ModelAdmin):
-    list_display = ('id', 'lease', 'part', 'quantity', 'amount', 'vat', 'date', 'is_paid')
-    list_filter = ('is_paid', 'date')
-    search_fields = ('lease__lease_number', 'part__part_name')
+    list_display = ('id', 'lease_display', 'part', 'quantity', 'unit_amount', 'subtotal', 'vat_amount', 'total_amount', 'apply_vat', 'is_paid', 'date')
+    list_filter = ('is_paid', 'apply_vat', 'date', 'vat_rate')
+    search_fields = ('lease__lease_no', 'part__part_name')
     date_hierarchy = 'date'
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = ('subtotal', 'vat_amount', 'total_amount', 'created_at', 'updated_at')
+    raw_id_fields = ('lease', 'part', 'store_inquiry')
+    
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('lease', 'part', 'store_inquiry', 'quantity', 'date')
+        }),
+        ('Pricing & VAT', {
+            'fields': ('unit_amount', 'apply_vat', 'vat_rate', 'subtotal', 'vat_amount', 'total_amount'),
+            'description': 'VAT calculations are automatically computed based on settings'
+        }),
+        ('Status', {
+            'fields': ('is_paid',)
+        }),
+        ('Metadata', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def lease_display(self, obj):
+        return obj.lease.lease_no if obj.lease else "No Lease"
+    lease_display.short_description = 'Lease Contract'
+    
+    def save_model(self, request, obj, form, change):
+        # The model's save method will handle VAT calculations
+        super().save_model(request, obj, form, change)
 
 @admin.register(LeaseAccInquiry)
 class LeaseAccInquiryAdmin(admin.ModelAdmin):
@@ -317,7 +427,6 @@ class QuotationItemAdmin(admin.ModelAdmin):
     search_fields = ('item_name', 'quotation__quotation_no')
     readonly_fields = ('total_price',)
 
-# New admin registrations for previously missing models
 @admin.register(LoginAttempt)
 class LoginAttemptAdmin(admin.ModelAdmin):
     list_display = ('ip_address', 'email', 'success', 'timestamp')

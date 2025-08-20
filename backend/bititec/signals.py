@@ -27,3 +27,5 @@ def add_user_to_global_chat(sender, instance, created, **kwargs):
     if created:  # Only for newly created users
         global_chat = get_or_create_global_chat()
         global_chat.members.add(instance)
+
+
