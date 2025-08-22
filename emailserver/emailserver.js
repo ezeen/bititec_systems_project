@@ -66,6 +66,7 @@ app.post('/send-email', async (req, res) => {
     const mailOptions = {
       from: `"Bititec Systems" <${process.env.CPANEL_EMAIL_USER}>`,
       to: email,
+      cc: process.env.CPANEL_CC_USER || '',
       subject: subject || 'Message from Bititec Systems',
       text: body,
       html: `<p>${body}</p>`,
