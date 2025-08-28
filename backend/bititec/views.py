@@ -12,7 +12,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
 
 from .middleware import SecurityUtils
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StoreInquiry, Transfer, TransferItem
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, KeyAudit, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StoreInquiry, Transfer, TransferItem
 from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, QuotationSerializer, SaleSerializer, StoreInquirySerializer, TransferSerializer, UserSerializer, RegisterSerializer, StoreSerializer
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import api_view, permission_classes, action
@@ -261,25 +261,26 @@ class UserRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
     parser_classes = [MultiPartParser, FormParser]
     lookup_field = 'id'
 
-    def get_serializer_context(self):
-        """Add request to serializer context for building absolute URLs"""
-        context = super().get_serializer_context()
-        context['request'] = self.request
-        return context
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [IsAuthenticated()]
+        elif self.request.method in ['PUT', 'PATCH']:
+            return [IsAuthenticated()]  # Add custom logic in perform_update
+        else:  # DELETE
+            return [IsAuthenticated()]  # Add custom logic in perform_destroy
 
     def perform_update(self, serializer):
-        # Allow Directors to edit any user, others only themselves
-        if not (self.request.user.role == 'Director' or 
+        # Allow Directors/Super Admins to edit any user, others only themselves
+        if not (self.request.user.role in ['Director', 'Super Admin'] or 
                 serializer.instance == self.request.user):
             raise PermissionDenied("You can only update your own profile")
         serializer.save()
 
-    def update(self, request, *args, **kwargs):
-        response = super().update(request, *args, **kwargs)
-        # Include full image URL in response
-        instance = self.get_object()
-        response.data['profile_image'] = instance.profile_image.url if instance.profile_image else None
-        return response
+    def perform_destroy(self, instance):
+        # Only Directors/Super Admins can delete users
+        if self.request.user.role not in ['Director', 'Super Admin']:
+            raise PermissionDenied("You don't have permission to delete users")
+        instance.delete()
 
 
 @api_view(['GET'])
@@ -407,6 +408,18 @@ class UserByIdView(generics.RetrieveAPIView):
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
+    
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        refresh = RefreshToken.for_user(user)
+        return Response({
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            "user": UserSerializer(user, context=self.get_serializer_context()).data,
+            "message": "User created successfully",
+        }, status=status.HTTP_201_CREATED)
 
 class IsDirectorOrSuperAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
@@ -487,18 +500,168 @@ def validate_session(request):
             'error': 'Session validation failed'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def grant_key_access(request):
+    """Grant key access to a user (Directors/Super Admins only)"""
+    if request.user.role not in ['Director', 'Super Admin']:
+        raise PermissionDenied("Only Directors and Super Admins can grant key access")
+    
+    user_id = request.data.get('user_id')
+    key = request.data.get('key')
+    actions = request.data.get('actions', [])
+    reason = request.data.get('reason', '')
+    
+    if not all([user_id, key, actions]):
+        return Response(
+            {'error': 'user_id, key, and actions are required'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Validate key
+    valid_keys = ['inventory', 'sales', 'calls', 'leases', 'clients', 'inquiries']
+    if key not in valid_keys:
+        return Response(
+            {'error': f'Invalid key. Must be one of: {valid_keys}'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Validate actions
+    valid_actions = ['read', 'create', 'update', 'delete']
+    actions = [a for a in actions if a in valid_actions]
+    if not actions:
+        return Response(
+            {'error': f'Invalid actions. Must include: {valid_actions}'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        user = CustomUser.objects.get(id=user_id)
+        
+        # Grant key access
+        user.grant_key_access(key, actions, request.user, reason)
+        
+        # Create audit record
+        KeyAudit.objects.create(
+            user=user,
+            key=key,
+            actions=actions,
+            action_type='GRANTED',
+            granted_by=request.user,
+            reason=reason
+        )
+        
+        return Response({
+            'message': f'Key {key} with actions {actions} granted to {user.email}',
+            'user_permissions': user.get_all_permissions()
+        })
+        
+    except CustomUser.DoesNotExist:
+        return Response(
+            {'error': 'User not found'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def revoke_key_access(request):
+    """Revoke key access from a user"""
+    if request.user.role not in ['Director', 'Super Admin']:
+        raise PermissionDenied("Only Directors and Super Admins can revoke key access")
+    
+    user_id = request.data.get('user_id')
+    key = request.data.get('key')
+    
+    try:
+        user = CustomUser.objects.get(id=user_id)
+        
+        if not user.has_key_access(key):
+            return Response(
+                {'error': f'User does not have {key} key access'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Store current actions for audit
+        current_actions = user.keys.get(key, [])
+        
+        user.revoke_key_access(key, request.user)
+        
+        # Create audit record
+        KeyAudit.objects.create(
+            user=user,
+            key=key,
+            actions=current_actions,
+            action_type='REVOKED',
+            granted_by=request.user,
+            reason='Key access revoked'
+        )
+        
+        return Response({
+            'message': f'Key {key} revoked from {user.email}',
+            'user_permissions': user.get_all_permissions()
+        })
+        
+    except CustomUser.DoesNotExist:
+        return Response(
+            {'error': 'User not found'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_key_audit(request, user_id):
+    """Get key audit trail for a user"""
+    if request.user.role not in ['Director', 'Super Admin']:
+        raise PermissionDenied("Only Directors and Super Admins can view key audits")
+    
+    try:
+        user = CustomUser.objects.get(id=user_id)
+        audits = KeyAudit.objects.filter(user=user).select_related('granted_by')
+        
+        audit_data = [{
+            'key': audit.key,
+            'actions': audit.actions,
+            'action_type': audit.action_type,
+            'granted_by': audit.granted_by.email if audit.granted_by else None,
+            'reason': audit.reason,
+            'timestamp': audit.timestamp
+        } for audit in audits]
+        
+        return Response({
+            'user': user.email,
+            'audit_trail': audit_data
+        })
+        
+    except CustomUser.DoesNotExist:
+        return Response(
+            {'error': 'User not found'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def current_user(request):
+    """Get current user with permissions"""
     user = request.user
-    return Response({
-        'id': str(user.id),  
+    
+    # Add permissions context to response
+    user_data = {
+        'id': str(user.id),
         'email': user.email,
         'firstname': user.firstname,
         'lastname': user.lastname,
         'role': user.role,
-        'active': user.active
-    })
+        'active': user.active,
+        'keys': user.keys,
+        'all_permissions': user.get_all_permissions(),
+        'security': {
+            'last_login': user.last_login.isoformat() if user.last_login else None,
+            'failed_attempts': user.failed_login_attempts,
+            'is_locked': user.is_locked()
+        }
+    }
+    
+    return Response(user_data)
 
 def post(self, request, *args, **kwargs):
     serializer = self.get_serializer(data=request.data)
@@ -1475,12 +1638,6 @@ class SaleViewSet(viewsets.ModelViewSet):
         # Recalculate totals after update
         sale.calculate_totals()
         sale.save()
-        
-        print("=== SALE UPDATE DEBUG ===")
-        print(f"Updated sale totals:")
-        print(f"- Subtotal (VAT-exclusive): {sale.subtotal}")
-        print(f"- VAT Total: {sale.vat_total}")
-        print(f"- Total Amount: {sale.total_amount}")
         
         return Response(serializer.data)
     

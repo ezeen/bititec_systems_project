@@ -46,6 +46,14 @@ class CustomUser(AbstractUser):
         ('Technician', 'Technician'),
     )
     
+    KEY_CHOICES = (
+        ('inventory', 'Inventory'),
+        ('sales', 'Sales'),
+        ('calls', 'Calls'),
+        ('leases', 'Leases'),
+        ('clients', 'Clients'),
+    )
+    
     username = None
     email = models.EmailField(_('email address'), unique=True)
     firstname = models.CharField(_('first name'), max_length=100)
@@ -59,7 +67,24 @@ class CustomUser(AbstractUser):
     failed_login_attempts = models.IntegerField(default=0)
     locked_until = models.DateTimeField(null=True, blank=True)
     last_failed_login = models.DateTimeField(null=True, blank=True)
-    security_token = models.CharField(max_length=255, null=True, blank=True)  # For additional security
+    security_token = models.CharField(max_length=255, null=True, blank=True)
+    
+    # Key-based permissions (replaces additional_permissions)
+    keys = models.JSONField(
+        default=dict,
+        blank=True,
+        null=True,
+        help_text="Permission keys with access levels: {'inventory': ['read', 'create'], 'sales': ['read', 'update', 'delete']}"
+    )
+    keys_granted_by = models.ForeignKey(
+        'self', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='granted_keys'
+    )
+    keys_granted_at = models.DateTimeField(null=True, blank=True)
+    keys_reason = models.TextField(blank=True, help_text="Reason for granting keys")
     
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['firstname', 'lastname', 'role']
@@ -69,77 +94,203 @@ class CustomUser(AbstractUser):
     def __str__(self):
         return self.email
     
-    def is_locked(self):
-        """Check if account is currently locked"""
-        if self.locked_until and timezone.now() < self.locked_until:
-            return True
-        return False
+    def has_key_access(self, key, action=None):
+        """Check if user has access to a specific key and action"""
+        if not self.keys:  # This will handle both None and empty dict
+            return False
+        
+        key_permissions = self.keys.get(key, [])
+        if not key_permissions:
+            return False
+            
+        if action is None:
+            return True  # Has key access
+            
+        return action in key_permissions
     
+    def get_role_permissions(self):
+        """Get base permissions based on role"""
+        role_permission_map = {
+            'Director': {
+                'sales': ['read', 'create', 'update', 'delete'],
+                'inventory': ['read', 'create', 'update', 'delete'],
+                'calls': ['read', 'create', 'update', 'delete'],
+                'leases': ['read', 'create', 'update', 'delete'],
+                'clients': ['read', 'create', 'update', 'delete'],
+                'inquiries': ['read', 'create', 'update', 'delete'],
+            },
+            'Super Admin': {
+                'sales': ['read', 'create', 'update', 'delete'],
+                'inventory': ['read', 'create', 'update', 'delete'],
+                'calls': ['read', 'create', 'update', 'delete'],
+                'leases': ['read', 'create', 'update', 'delete'],
+                'clients': ['read', 'create', 'update', 'delete'],
+                'inquiries': ['read', 'create', 'update', 'delete'],
+            },
+            'Sales Manager': {
+                'sales': ['read', 'create', 'update', 'delete'],
+                'clients': ['read', 'create', 'update', 'delete']
+            },
+            'Sales Member': {
+                'sales': ['read', 'create', 'update']
+            },
+            'Inventory Manager': {
+                'inventory': ['read', 'create', 'update', 'delete'],
+                'inquiries': ['read', 'create', 'update', 'delete'],
+            },
+            'Technician Manager': {
+                'calls': ['read', 'create', 'update', 'delete']
+            },
+            'Technician': {
+                'calls': ['read', 'create', 'update']
+            }
+        }
+        return role_permission_map.get(self.role, {})
+    
+    def has_permission(self, key, action):
+        """Check if user has permission for a specific key and action"""
+        # First check role-based permissions
+        role_permissions = self.get_role_permissions()
+        if key in role_permissions and action in role_permissions[key]:
+            return True
+            
+        # Then check key-based permissions
+        return self.has_key_access(key, action)
+    
+    def get_all_permissions(self):
+        """Get combined role and key permissions"""
+        role_perms = self.get_role_permissions()
+        key_perms = self.keys or {}  # Handle None case
+        
+        # Merge permissions
+        all_perms = {}
+        for key in ['inventory', 'sales', 'calls', 'leases', 'clients', 'inquiries']:
+            combined_actions = set()
+            
+            # Add role permissions
+            if key in role_perms:
+                combined_actions.update(role_perms[key])
+                
+            # Add key permissions
+            if key in key_perms:
+                combined_actions.update(key_perms[key])
+                
+            if combined_actions:
+                all_perms[key] = list(combined_actions)
+                
+        return all_perms
+    
+    def grant_key_access(self, key, actions, granted_by_user, reason=""):
+        """Grant key access with specific actions"""
+        if not self.keys:
+            self.keys = {}
+        
+        # Validate actions
+        valid_actions = ['read', 'create', 'update', 'delete']
+        actions = [a for a in actions if a in valid_actions]
+        
+        self.keys[key] = actions
+        self.keys_granted_by = granted_by_user
+        self.keys_granted_at = timezone.now()
+        self.keys_reason = reason
+        self.save(update_fields=['keys', 'keys_granted_by', 'keys_granted_at', 'keys_reason'])
+        
+        # Log security event
+        SecurityEvent.objects.create(
+            user=self,
+            event_type='KEY_GRANTED',
+            ip_address='system',
+            details={
+                'key': key,
+                'actions': actions,
+                'granted_by': str(granted_by_user.id),
+                'reason': reason
+            }
+        )
+
+    def revoke_key_access(self, key, revoked_by_user):
+        """Revoke key access"""
+        if self.keys and key in self.keys:
+            del self.keys[key]
+            # If keys becomes empty, you can either keep it as {} or set to None
+            if not self.keys:
+                self.keys = {}  # Keep as empty dict, or set to None if preferred
+            self.save(update_fields=['keys'])
+            
+            # Log security event
+            SecurityEvent.objects.create(
+                user=self,
+                event_type='KEY_REVOKED',
+                ip_address='system',
+                details={
+                    'key': key,
+                    'revoked_by': str(revoked_by_user.id)
+                }
+            )
+    
+    def is_locked(self):
+        """Check if user account is currently locked"""
+        if not self.locked_until:
+            return False
+        return timezone.now() < self.locked_until
+
     def lock_account(self, duration_minutes=30):
-        """Lock account for specified duration"""
+        """Lock the user account for specified duration"""
         self.locked_until = timezone.now() + timedelta(minutes=duration_minutes)
         self.save(update_fields=['locked_until'])
-    
+        
+        # Log security event
+        SecurityEvent.objects.create(
+            user=self,
+            event_type='ACCOUNT_LOCKED',
+            ip_address='system',
+            details={'locked_for_minutes': duration_minutes}
+        )
+
     def unlock_account(self):
-        """Unlock account and reset failed attempts"""
-        self.failed_login_attempts = 0
+        """Unlock the user account"""
         self.locked_until = None
-        self.last_failed_login = None
-        self.save(update_fields=['failed_login_attempts', 'locked_until', 'last_failed_login'])
-    
+        self.failed_login_attempts = 0
+        self.save(update_fields=['locked_until', 'failed_login_attempts'])
+
     def increment_failed_login(self):
         """Increment failed login attempts and lock if necessary"""
         self.failed_login_attempts += 1
         self.last_failed_login = timezone.now()
         
-        if self.failed_login_attempts >= 3:
-            # Lock for 30 minutes after 3 failed attempts
+        # Lock account after 5 failed attempts for 30 minutes
+        if self.failed_login_attempts >= 5:
             self.lock_account(30)
-        elif self.failed_login_attempts >= 5:
-            # Lock for 1 hour after 5 failed attempts
-            self.lock_account(60)
-        elif self.failed_login_attempts >= 10:
-            # Lock for 24 hours after 10 failed attempts
-            self.lock_account(1440)
-            
-        self.save(update_fields=['failed_login_attempts', 'last_failed_login'])
-    
-    def reset_failed_login_attempts(self):
-        """Reset failed login attempts on successful login"""
-        if self.failed_login_attempts > 0:
-            self.failed_login_attempts = 0
-            self.last_failed_login = None
-            self.save(update_fields=['failed_login_attempts', 'last_failed_login'])
-    
-    
-    def save(self, *args, **kwargs):
-        # Format phone number to Kenya format if provided
-        if self.phonenumber:
-            # Remove any spaces, dashes, or other non-digit characters except +
-            phone = ''.join(filter(lambda x: x.isdigit() or x == '+', str(self.phonenumber)))
-            
-            # Handle different input formats
-            if phone.startswith('0'):
-                # Convert 0712345678 to +254712345678
-                phone = '+254' + phone[1:]
-            elif phone.startswith('254'):
-                # Convert 254712345678 to +254712345678
-                phone = '+' + phone
-            elif phone.startswith('7') or phone.startswith('1'):
-                # Convert 712345678 to +254712345678
-                phone = '+254' + phone
-            elif not phone.startswith('+254'):
-                # If it doesn't match any pattern, assume it needs +254
-                phone = '+254' + phone.lstrip('+')
-            
-            self.phonenumber = phone
         
-        super().save(*args, **kwargs)
-    
+        self.save(update_fields=['failed_login_attempts', 'last_failed_login'])
+
+    def reset_failed_login_attempts(self):
+        """Reset failed login attempts after successful login"""
+        self.failed_login_attempts = 0
+        self.last_failed_login = None
+        self.save(update_fields=['failed_login_attempts', 'last_failed_login'])
+
+# Key audit model (replaces PermissionAudit)
+class KeyAudit(models.Model):
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    key = models.CharField(max_length=20)
+    actions = models.JSONField(default=list)
+    action_type = models.CharField(max_length=20, choices=[
+        ('GRANTED', 'Granted'),
+        ('REVOKED', 'Revoked'),
+        ('MODIFIED', 'Modified')
+    ])
+    granted_by = models.ForeignKey(
+        CustomUser, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        related_name='key_actions'
+    )
+    reason = models.TextField()
+    timestamp = models.DateTimeField(auto_now_add=True)
     
     class Meta:
-        verbose_name = _('user')
-        verbose_name_plural = _('users')
+        ordering = ['-timestamp']
 
 class LoginAttempt(models.Model):
     """Track login attempts from different IPs"""
@@ -658,10 +809,18 @@ class Call(models.Model):
         ('Completed', 'Completed'),  
         ('Closed', 'Closed'),
     ]
+
+    SERVICE_TYPE_CHOICES = [
+        ('Network Support', 'Network Support'),
+        ('Hardware & Software Support', 'Hardware & Software Support'),
+        ('Installation', 'Installation'),
+        ('Scheduled Maintenance', 'Scheduled Maintenance'),
+    ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     technician = models.ManyToManyField(CustomUser, related_name='calls')
     contract_type = models.CharField(max_length=100)
+    service_type = models.CharField(max_length=50, choices=SERVICE_TYPE_CHOICES, default='Hardware & Software Support')
     client = models.ForeignKey(Client, on_delete=models.PROTECT, null=True, blank=True)
     reported_by = models.CharField(max_length=255)
     reported_date = models.DateTimeField(default=timezone.now)
