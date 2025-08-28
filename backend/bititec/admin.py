@@ -1,14 +1,14 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Accessory, AccessoryType, Call, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, Machine, MachineType, MeterReading, Part, PartType, Quotation, QuotationItem, Sale, SaleItem, SecurityEvent, ServiceCallToken, Store, StoreInquiry
+from .models import Accessory, AccessoryType, Call, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, KeyAudit, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, Machine, MachineType, MeterReading, Part, PartType, Quotation, QuotationItem, Sale, SaleItem, SecurityEvent, ServiceCallToken, Store, StoreInquiry
 from django.utils.html import format_html
 
 class CustomUserAdmin(UserAdmin):
-    list_display = ('email', 'get_full_name', 'role', 'active', 'is_staff', 'profile_image_tag')
-    list_filter = ('role', 'active', 'is_staff')
+    list_display = ('email', 'get_full_name', 'role', 'active', 'is_staff', 'profile_image_tag', 'failed_login_attempts', 'is_locked_display')
+    list_filter = ('role', 'active', 'is_staff', 'failed_login_attempts')
     search_fields = ('email', 'firstname', 'lastname')
     ordering = ('email',)
-    readonly_fields = ('profile_image_tag',)
+    readonly_fields = ('profile_image_tag', 'is_locked_display', 'keys_granted_at', 'last_failed_login')
 
     def profile_image_tag(self, obj):
         if obj.profile_image:
@@ -16,18 +16,31 @@ class CustomUserAdmin(UserAdmin):
         return "No Image"
     profile_image_tag.short_description = 'Profile Image'
     
+    def is_locked_display(self, obj):
+        return obj.is_locked() if hasattr(obj, 'is_locked') else 'Unknown'
+    is_locked_display.short_description = 'Account Locked'
+    is_locked_display.boolean = True
+    
     fieldsets = (
         (None, {'fields': ('email', 'password')}),
         ('Personal info', {'fields': ('firstname', 'lastname', 'phonenumber', 'role', 'profile_image', 'profile_image_tag')}),
         ('Permissions', {'fields': ('active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
+        ('Security Settings', {
+            'fields': ('failed_login_attempts', 'locked_until', 'last_failed_login', 'security_token', 'is_locked_display'),
+            'classes': ('collapse',)
+        }),
+        ('Key-based Permissions', {
+            'fields': ('keys', 'keys_granted_by', 'keys_granted_at', 'keys_reason'),
+            'classes': ('collapse',),
+            'description': 'Additional permissions granted via key system'
+        }),
         ('Important dates', {'fields': ('last_login', 'date_joined')}),
-        
     )
     
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
-            'fields': ('email', 'firstname', 'lastname', 'phonenumber', 'role', 'password1', 'password2', 'profile_image_display'),
+            'fields': ('email', 'firstname', 'lastname', 'phonenumber', 'role', 'password1', 'password2', 'profile_image', 'active'),
         }),
     )
     
@@ -440,3 +453,21 @@ class SecurityEventAdmin(admin.ModelAdmin):
     list_filter = ('event_type', 'timestamp')
     search_fields = ('user__email', 'ip_address', 'event_type')
     readonly_fields = ('timestamp',)
+
+@admin.register(KeyAudit)
+class KeyAuditAdmin(admin.ModelAdmin):
+    list_display = ('user', 'key', 'action_type', 'granted_by', 'timestamp')
+    list_filter = ('action_type', 'key', 'timestamp')
+    search_fields = ('user__email', 'key', 'granted_by__email')
+    readonly_fields = ('timestamp',)
+    raw_id_fields = ('user', 'granted_by')
+    
+    fieldsets = (
+        ('Audit Information', {
+            'fields': ('user', 'key', 'actions', 'action_type', 'granted_by', 'reason')
+        }),
+        ('Metadata', {
+            'fields': ('timestamp',),
+            'classes': ('collapse',)
+        }),
+    )

@@ -19,62 +19,46 @@ class UserSerializer(serializers.ModelSerializer):
     failed_login_attempts = serializers.IntegerField(read_only=True)
     locked_until = serializers.DateTimeField(read_only=True)
     last_failed_login = serializers.DateTimeField(read_only=True)
+    keys = serializers.DictField(read_only=True)
+    all_permissions = serializers.SerializerMethodField()
 
     def get_is_locked(self, obj):
         return obj.is_locked()
+    
+    def get_all_permissions(self, obj):
+        return obj.get_all_permissions()
 
     def validate_phonenumber(self, value):
         """Validate phone number format"""
-        if not value:  # Allow empty/null values
+        if not value:
             return value
             
-        # Remove spaces and other formatting
         phone = ''.join(filter(lambda x: x.isdigit() or x == '+', str(value)))
         
-        # Basic validation for Kenya phone numbers
         if phone and not (phone.startswith('+254') or phone.startswith('254') or 
                          phone.startswith('0') or phone.startswith('7') or phone.startswith('1')):
             raise serializers.ValidationError("Invalid phone number format for Kenya")
         
         return value
-
-    def update(self, instance, validated_data):
-        # Handle profile image update properly
-        profile_image = validated_data.get('profile_image', None)
-        if profile_image is not None:
-            # Only delete old image if a new one is provided (not None)
-            if profile_image and instance.profile_image:
-                # Delete old image file
-                instance.profile_image.delete(save=False)
-            instance.profile_image = profile_image
-            
-        # Handle phone number formatting
-        phonenumber = validated_data.get('phonenumber')
-        if phonenumber is not None:
-            validated_data['phonenumber'] = phonenumber
-            
-        return super().update(instance, validated_data)
     
     def to_representation(self, instance):
         """Customize the serialized output"""
         data = super().to_representation(instance)
         
-        # Ensure profile_image returns full URL
+        # Handle profile image URL
         if instance.profile_image and instance.profile_image.name:
             try:
-                # Get the full URL including domain
                 request = self.context.get('request')
                 if request:
                     data['profile_image'] = request.build_absolute_uri(instance.profile_image.url)
                 else:
                     data['profile_image'] = instance.profile_image.url
             except ValueError:
-                # Handle case where image file doesn't exist
                 data['profile_image'] = None
         else:
             data['profile_image'] = None
             
-        # Ensure phone number is properly formatted for display
+        # Ensure phone number formatting
         if instance.phonenumber:
             data['phonenumber'] = instance.phonenumber
         else:
@@ -87,7 +71,8 @@ class UserSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'firstname', 'lastname',
             'phonenumber', 'role', 'active', 'profile_image', 'is_locked',
-            'failed_login_attempts', 'locked_until', 'last_failed_login'
+            'failed_login_attempts', 'locked_until', 'last_failed_login',
+            'keys', 'all_permissions'
         ]
         extra_kwargs = {'password': {'write_only': True}, 'role': {'read_only': True}}
         
@@ -128,6 +113,8 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         data['email'] = self.user.email
         data['role'] = self.user.role
         data['active'] = self.user.active
+        data['keys'] = self.user.keys
+        data['all_permissions'] = self.user.get_all_permissions()
         return data
 
     @classmethod
@@ -135,7 +122,34 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token = super().get_token(user)
         token['email'] = user.email
         token['role'] = user.role
+        token['keys'] = user.keys
         return token
+    
+class EnhancedUserSerializer(serializers.ModelSerializer):
+    keys = serializers.DictField(read_only=True)
+    all_permissions = serializers.SerializerMethodField()
+    key_audit = serializers.SerializerMethodField()
+
+    def get_all_permissions(self, obj):
+        return obj.get_all_permissions()
+    
+    def get_key_audit(self, obj):
+        if self.context['request'].user.role in ['Director', 'Super Admin']:
+            return {
+                'granted_by': obj.keys_granted_by.email if obj.keys_granted_by else None,
+                'granted_at': obj.keys_granted_at,
+                'reason': obj.keys_reason
+            }
+        return None
+
+    class Meta:
+        model = CustomUser
+        fields = [
+            'id', 'email', 'firstname', 'lastname', 'phonenumber', 'role', 
+            'active', 'profile_image', 'is_locked', 'failed_login_attempts', 
+            'locked_until', 'last_failed_login', 'keys', 
+            'all_permissions', 'key_audit'
+        ]
 
 class StoreSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(read_only=True)
@@ -668,6 +682,7 @@ class CallSerializer(serializers.ModelSerializer):
     item_name = serializers.SerializerMethodField()
     serial_no = serializers.SerializerMethodField()
     store_name = serializers.SerializerMethodField()
+    service_type = serializers.ChoiceField(choices=Call.SERVICE_TYPE_CHOICES)
     
     # Nested objects (these need to be proper serializers)
     client = ClientSerializer(read_only=True)
@@ -712,7 +727,7 @@ class CallSerializer(serializers.ModelSerializer):
     class Meta:
         model = Call
         fields = [
-            'id', 'technician', 'technician_ids', 'contract_type', 
+            'id', 'technician', 'technician_ids', 'contract_type', 'service_type',
             'client', 'client_id', 'client_name', 'client_name_display', 
             'client_location', 'client_location_display',
             'reported_by', 'reported_date', 
