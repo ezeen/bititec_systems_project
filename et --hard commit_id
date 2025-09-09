@@ -1,0 +1,67 @@
+[33md5e7de0[m[33m ([m[1;36mHEAD -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m Merge branch 'main' of https://github.com/ezeen/bititec_systems_project
+[33mbb52bae[m Added PO and corrected accessory inquiry bugs
+[33m9374c5b[m Merge branch 'main' of https://github.com/ezeen/bititec_systems_project
+[33mf80fbb9[m Updated Key-based permsiions
+[33mea9eb66[m Merge branch 'main' of https://github.com/ezeen/bititec_systems_project
+[33m38cc09e[m Added a cc email
+[33m4e65367[m Merge branch 'main' of https://github.com/ezeen/bititec_systems_project
+[33m197782b[m Pricing correction and new features added
+[33me2be9f0[m Merge branch 'main' of https://github.com/ezeen/bititec_systems_project
+[33m49d910d[m Reverted the worflow
+[33ma0968c6[m Added a new Machine status
+[33m1ab7ad4[m Resolve merge conflicts between local and remote main
+[33m930413d[m Enhanced git conflict resolution
+[33mfbe5ac0[m Enhances conflict resolution
+[33mb28d8b4[m New migrations
+[33m542e660[m Fixed bugs and added new fields to serializers
+[33mcd85ffd[m Added an new Transfer model
+[33mbf41999[m temporary changes to commit
+[33m8bb55cb[m Updated requirements
+[33m7e9ab46[m Updated migration file
+[33m808e3ac[m Updated pulling request workflows
+[33me92c768[m Bug fix: Correct SSH key setup in deploy workflow
+[33macef607[m Error fixing deployment workflow
+[33md5f061d[m Updated deploy script
+[33m4a0bb70[m Updated email servicing files
+[33m33db8f5[m Security Hardening and Bug Fixes
+[33m231cf1d[m more migrations
+[33m227a59a[m Updated Logic flow
+[33m372cc2f[m added a lease url
+[33m620dd86[m Updated logic flow for permissions
+[33m38bcd8f[m Modified attributes
+[33m9c2e152[m More updates on docker commands
+[33m12d03b7[m Update docker commands
+[33mfae29cd[m Merge branch 'main' of github.com:ezeen/bititec_systems_project
+[33m03fd211[m Updated health check and port configs
+[33m997fddf[m Cleaned up the code structure
+[33m99c09e5[m Updated the Id type for the service call
+[33m0bf154c[m Merge branch 'main' of github.com:ezeen/bititec_systems_project
+[33m4799bec[m Fixed issue with migrations and deployment script
+[33mfe117fb[m Fix container deployment workflow
+[33ma909eb3[m Fix deploy workflow
+[33m3e7845f[m Fixing deploy workflow
+[33maf933f9[m Port Changes
+[33me479032[m Port Changes
+[33md2d4ee3[m More changes to be committed on the pipeline
+[33mb1de546[m More updates to the deploy workflow
+[33m33d4730[m Updates deploy.yml for testing
+[33me09775d[m Added workflows
+[33m3c60efb[m Renamed workflows
+[33m07bb17c[m Final Updates to Version 1.0.0
+[33m7429645[m Merging branch 'main' of github.com:ezeen/bititec_systems_project
+[33m2bff5a2[m Added permission class
+[33ma39f1bc[m Merging branch 'main' of github.com:ezeen/bititec_systems_project
+[33md543df9[m Changed Sale filters
+[33m654f4be[m Fixed Sales and Call issues
+[33m641a23d[m Modified Sales table
+[33m5caba9a[m Fixing admin.py to use the new serializer
+[33mb54a0a9[m Production Staging
+[33m0f54ed0[m Merging branch 'main' of github.com:ezeen/bititec_systems_project
+[33me90c09c[m Updating requirements.txt
+[33mc304f88[m Fixed models.py
+[33mdcc6485[m Changed model
+[33mf3ddb1a[m Reset migrations
+[33m517fe2f[m Adding more requirements
+[33m0e275fa[m Adding requirements
+[33mf5eab61[m Setup unified CI/CD for frontend and backend
+[33mf780f8e[m first commit

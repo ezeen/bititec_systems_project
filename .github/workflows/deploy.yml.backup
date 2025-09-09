@@ -1,0 +1,341 @@
+# .github/workflows/deploy.yml
+
+name: CI/CD for BITITECSYSTEM Backend & EmailServer
+
+# Trigger on pushes to main branch for backend/ and emailserver/ directories
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'backend/**'
+      - 'emailserver/**'
+      - '.github/workflows/deploy.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'backend/**'
+      - 'emailserver/**'
+
+jobs:
+  # Test job - runs Django tests with PostgreSQL
+  test:
+    name: Run Django Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: test_db
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Django tests
+        working-directory: backend
+        env:
+          DB_NAME: test_db
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_HOST: localhost
+          DB_PORT: 5432
+          SECRET_KEY: test-secret-key-for-testing
+          DEBUG: 'True'
+          DJANGO_SETTINGS_MODULE: 'bit_app.settings'  # Replace with your actual settings module
+        run: |
+          python manage.py migrate
+          python manage.py test
+
+  # Deploy job - only runs on successful tests and main branch pushes
+  deploy:
+    name: Deploy to Production Server
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        
+      - name: Setup SSH Key
+        run: |
+          echo "🔧 Setting up SSH key..."
+          mkdir -p ~/.ssh
+          
+          # Check if secrets are available
+          if [ -z "${{ secrets.SERVER_HOST }}" ]; then
+            echo "❌ SERVER_HOST secret is empty or not set"
+            exit 1
+          fi
+          
+          if [ -z "${{ secrets.SERVER_USER }}" ]; then
+            echo "❌ SERVER_USER secret is empty or not set"
+            exit 1
+          fi
+          
+          if [ -z "${{ secrets.SERVER_SSH_KEY }}" ]; then
+            echo "❌ SERVER_SSH_KEY secret is empty or not set"
+            exit 1
+          fi
+          
+          echo "✅ All secrets are present"
+          echo "🔑 SERVER_HOST: ${{ secrets.SERVER_HOST }}"
+          echo "👤 SERVER_USER: ${{ secrets.SERVER_USER }}"
+          
+          # Setup SSH key
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          
+          echo "🔍 Adding host to known_hosts..."
+          ssh-keyscan -p 2222 -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts || {
+            echo "⚠️ ssh-keyscan failed, trying with StrictHostKeyChecking=no"
+          }
+          
+      - name: Test SSH Connection
+        run: |
+          echo "🧪 Testing SSH connection..."
+          echo "Host: ${{ secrets.SERVER_HOST }}"
+          echo "User: ${{ secrets.SERVER_USER }}"
+          echo "Port: 2222"
+          
+          # Test SSH connection with verbose output and port 2222
+          ssh -v -i ~/.ssh/deploy_key -p 2222 -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo 'SSH connection successful'; whoami; pwd; ls -la" || {
+            echo "❌ SSH connection failed"
+            echo "🔍 Checking SSH key format..."
+            head -n 1 ~/.ssh/deploy_key
+            tail -n 1 ~/.ssh/deploy_key
+            echo "🔍 Key file permissions:"
+            ls -la ~/.ssh/deploy_key
+            exit 1
+          }
+          
+      - name: Deploy via SSH
+        run: |
+          ssh -i ~/.ssh/deploy_key -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+            echo "🚀 Starting deployment process..."
+            
+           # Navigate to your production directory (which is also your Git repo)
+            cd ${{ secrets.SERVER_PATH }}
+            echo "📂 Current directory: $(pwd)"
+            
+            # Verify this is a git repository
+            if [ ! -d ".git" ]; then
+              echo "❌ Error: Not a git repository!"
+              exit 1
+            fi
+            
+            # Show current branch and status
+            echo "🔍 Git status before pull:"
+            git status --porcelain
+            echo "🌟 Current branch: $(git branch --show-current)"
+            
+            # Stash any local changes to avoid conflicts
+            echo "💾 Stashing any local changes..."
+            git stash
+            
+            # Reset to ensure clean state
+            echo "🔄 Resetting to clean state..."
+            git reset --hard HEAD
+            
+            # Pull latest changes from main branch
+            echo "📦 Pulling latest changes from repository..."
+            git fetch origin
+            git pull origin main
+            
+            # Show what was updated
+            echo "📋 Recent changes pulled:"
+            git log --oneline -5
+            
+            # Sync backend files to production directory
+            echo "📁 Syncing backend files to bititecsystems/backend/..."
+            if [ -d "backend" ]; then
+              # Create backup of existing backend folder
+              if [ -d "bititecsystems/backend" ]; then
+                echo "💾 Creating backup of existing backend..."
+                cp -r bititecsystems/backend bititecsystems/backend_backup_$(date +%Y%m%d_%H%M%S)
+              fi
+              
+              # Ensure target directory exists
+              mkdir -p bititecsystems/backend
+              
+              # Sync all backend files (preserving existing file permissions)
+              rsync -av --delete backend/ bititecsystems/backend/
+              echo "✅ Backend files synced successfully"
+            else
+              echo "⚠️ Backend directory not found in repository"
+            fi
+            
+            # Sync emailserver files to production directory
+            echo "📁 Syncing emailserver files to bititecsystems/emailserver/..."
+            if [ -d "emailserver" ]; then
+              # Create backup of existing emailserver folder
+              if [ -d "bititecsystems/emailserver" ]; then
+                echo "💾 Creating backup of existing emailserver..."
+                cp -r bititecsystems/emailserver bititecsystems/emailserver_backup_$(date +%Y%m%d_%H%M%S)
+              fi
+              
+              # Ensure target directory exists
+              mkdir -p bititecsystems/emailserver
+              
+              # Sync all emailserver files (preserving existing file permissions)
+              rsync -av --delete emailserver/ bititecsystems/emailserver/
+              echo "✅ EmailServer files synced successfully"
+            else
+              echo "⚠️ EmailServer directory not found in repository"
+            fi
+            
+            # Show updated directory structure
+            echo "📂 Updated directory structure:"
+            ls -la bititecsystems/
+            echo "📂 Backend files:"
+            ls -la bititecsystems/backend/ | head -10
+            echo "📂 EmailServer files:"
+            ls -la bititecsystems/emailserver/ | head -10
+            
+            # Load environment variables if you have them
+            if [ -f /home/bititec_server/shared/scripts/load_env.sh ]; then
+              echo "🔧 Loading environment variables..."
+              source /home/bititec_server/shared/scripts/load_env.sh
+            fi
+
+           # Navigate to docker compose directory
+            cd "$HOME/shared"
+            
+            # Verify docker-compose.yml exists
+            if [ ! -f "docker-compose.yml" ]; then
+              echo "❌ docker-compose.yml not found in $(pwd)"
+              ls -la
+              exit 1
+            fi
+            
+            echo "✅ Found docker-compose.yml in $(pwd)"
+            
+            echo "🛑 Stopping services gracefully..."
+            # Stop the services gracefully
+            docker compose stop backend_bititecsystems emailserver_bititecsystems
+
+            echo "🗑️ Removing old containers..."
+            docker compose down --remove-orphans
+
+            echo "🧹 Pruning unused images & volumes..."
+            docker system prune -f
+
+            echo "🔨 Building updated images with latest code..."
+            # Rebuild the images with no cache to ensure fresh build with new code
+            docker compose build --no-cache backend_bititecsystems emailserver_bititecsystems
+            
+            echo "🚀 Starting services..."
+            # Start the services
+            docker compose up -d nginx backend_bititecsystems emailserver_bititecsystems db_bititecsystems
+            
+            # Wait for services to be ready
+            echo "⏳ Waiting for services to start..."
+            sleep 45
+            
+            # Check if backend container is running before executing commands
+            if docker compose ps backend_bititecsystems | grep -q "Up"; then
+              echo "✅ Backend container is running"
+              
+              # Check for pending migrations first
+              echo "🔍 Checking for pending migrations..."
+              docker compose exec -T backend_bititecsystems python manage.py showmigrations --plan || echo "⚠️ Could not check migration status"
+              
+              echo "🗄️ Making new migrations (if any)..."
+              # Make migrations for any model changes
+              docker compose exec -T backend_bititecsystems python manage.py makemigrations
+              
+              echo "🗄️ Applying database migrations..."
+              # Apply all migrations
+              docker compose exec -T backend_bititecsystems python manage.py migrate
+              
+              echo "📁 Collecting static files..."
+              # Collect static files
+              docker compose exec -T backend_bititecsystems python manage.py collectstatic --noinput
+              
+              # Verify migrations are up to date
+              echo "✅ Verifying all migrations are applied..."
+              docker compose exec -T backend_bititecsystems python manage.py showmigrations
+              
+              echo "🔄 Restarting services to ensure everything is fresh..."
+              # Restart all services to ensure everything is properly connected
+              docker compose restart backend_bititecsystems emailserver_bititecsystems
+              
+            else
+              echo "❌ Backend container failed to start!"
+              echo "📋 Backend container logs:"
+              docker compose logs backend_bititecsystems
+              exit 1
+            fi
+            
+            # Optional: Restart nginx if you have it in your docker compose
+            if docker compose ps nginx | grep -q "nginx"; then
+              echo "🔄 Restarting nginx..."
+              docker compose restart nginx
+            fi
+            
+            echo "📊 Final status check..."
+            docker compose ps
+            
+            # Clean up old backups (keep only last 3)
+            echo "🧹 Cleaning up old backups..."
+            cd ../bititecsystems
+            ls -t backend_backup_* 2>/dev/null | tail -n +4 | xargs rm -rf 2>/dev/null || true
+            ls -t emailserver_backup_* 2>/dev/null | tail -n +4 | xargs rm -rf 2>/dev/null || true
+            
+            echo "✅ Deployment completed successfully!"
+            echo "📋 Summary:"
+            echo "  - Repository updated with latest changes"
+            echo "  - Backend files synced to bititecsystems/backend/"
+            echo "  - EmailServer files synced to bititecsystems/emailserver/"
+            echo "  - Docker containers rebuilt with new code"
+            echo "  - Database migrations applied"
+            echo "  - Static files collected"
+            echo "  - All services restarted"
+          EOF
+
+  # Optional: Send notification on deployment status
+  notify:
+    name: Send Notification
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: always() && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Send notification on success
+        if: needs.deploy.result == 'success'
+        run: |
+          echo "✅ Deployment successful! Your server has been updated with the latest changes."
+          
+      - name: Send notification on failure
+        if: needs.deploy.result == 'failure'
+        run: |
+          echo "❌ Deployment failed! Check the logs for details."
