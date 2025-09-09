@@ -12,8 +12,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
 
 from .middleware import SecurityUtils
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, KeyAudit, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StoreInquiry, Transfer, TransferItem
-from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, QuotationSerializer, SaleSerializer, StoreInquirySerializer, TransferSerializer, UserSerializer, RegisterSerializer, StoreSerializer
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, KeyAudit, PurchaseOrder, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem
+from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, PurchaseOrderSerializer, QuotationSerializer, SaleSerializer, StorePartInquirySerializer, StoreAccessoryInquirySerializer, TransferSerializer, UserSerializer, RegisterSerializer, StoreSerializer
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.views import APIView
@@ -1012,22 +1012,90 @@ class ClientRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
     lookup_field = 'id'
 
-class StoreInquiryViewSet(viewsets.ModelViewSet):
-    serializer_class = StoreInquirySerializer
+class StorePartInquiryViewSet(viewsets.ModelViewSet):
+    serializer_class = StorePartInquirySerializer
     permission_classes = [IsAuthenticated]
     requested_by = UserSerializer(read_only=True)
     lease_part_inquiries = LeasePartInquirySerializer(many=True, read_only=True)
     lookup_field = 'pk'
         
     def get_queryset(self):
-        queryset = StoreInquiry.objects.select_related(
+        queryset = StorePartInquiry.objects.select_related(
             'requested_by', 'issued_by', 'service_call'
         ).prefetch_related('lease_part_inquiries__part')
 
         service_call = self.request.query_params.get('service_call')
         if service_call:
-            return StoreInquiry.objects.filter(service_call=service_call)
-        return StoreInquiry.objects.all()
+            return StorePartInquiry.objects.filter(service_call=service_call)
+        return StorePartInquiry.objects.all()
+    
+    def get_permissions(self):
+        """
+        Override permissions based on action
+        """
+        if self.action in ['list', 'retrieve']:
+            # Allow all authenticated users to view store inquiries
+            permission_classes = [permissions.IsAuthenticated]
+        elif self.action in ['create']:
+            # Allow technicians and above to create inquiries
+            permission_classes = [permissions.IsAuthenticated, IsTechnicianOrAbove]
+        elif self.action in ['update', 'partial_update', 'destroy']:
+            # Restrict editing to inventory managers and above
+            permission_classes = [permissions.IsAuthenticated, IsInventoryManagerOrAbove]
+        else:
+            permission_classes = [permissions.IsAuthenticated]
+        
+        return [permission() for permission in permission_classes]
+    
+    def update(self, request, *args, **kwargs):
+        # Check specific permissions for store inquiry updates
+        user = request.user
+        user_role = user.role.lower() if user.role else ''
+        allowed_roles = ['director', 'super admin', 'inventory manager', 'sales manager']
+        
+        if user_role not in allowed_roles:
+            return Response(
+                {'error': 'You do not have permission to update store inquiries'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        data = request.data.copy()
+        
+        if 'unit_price' in data:
+            try:
+                data['unit_price'] = Decimal(str(data['unit_price']))
+            except (ValueError, TypeError, InvalidOperation) as e:
+                return Response(
+                    {'error': 'Invalid unit price format'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        serializer = self.get_serializer(instance, data=data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
+
+    def perform_create(self, serializer):
+        serializer.save(requested_by=self.request.user)
+
+class StoreAccessoryInquiryViewSet(viewsets.ModelViewSet):
+    serializer_class = StoreAccessoryInquirySerializer
+    permission_classes = [IsAuthenticated]
+    requested_by = UserSerializer(read_only=True)
+    lease_acc_inquiries = LeaseAccInquirySerializer(many=True, read_only=True)
+    lookup_field = 'pk'
+        
+    def get_queryset(self):
+        queryset = StoreAccessoryInquiry.objects.select_related(
+            'requested_by', 'issued_by', 'service_call'
+        ).prefetch_related('lease_acc_inquiries__accessory')
+
+        service_call = self.request.query_params.get('service_call')
+        if service_call:
+            queryset = queryset.filter(service_call=service_call)
+        return queryset
     
     def get_permissions(self):
         """
@@ -1470,9 +1538,46 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
         serializer = MeterReadingSerializer(readings, many=True)
         return Response(serializer.data)
     
+    # @action(detail=False, methods=['get'])
+    # def my_handled_leases(self, request):
+    #     """Get leases where current user is the account handler"""
+    #     queryset = self.get_queryset().filter(account_handler=request.user)
+    #     page = self.paginate_queryset(queryset)
+    #     if page is not None:
+    #         serializer = self.get_serializer(page, many=True)
+    #         return self.get_paginated_response(serializer.data)
+    #     serializer = self.get_serializer(queryset, many=True)
+    #     return Response(serializer.data)
+    
+    @action(detail=True, methods=['patch'])
+    def assign_account_handler(self, request, pk=None):
+        """Assign an account handler to a lease"""
+        lease = self.get_object()
+        user_id = request.data.get('account_handler_id')
+        
+        if user_id:
+            try:
+                user = CustomUser.objects.get(id=user_id, is_active=True)
+                lease.account_handler = user
+                lease.save()
+                serializer = self.get_serializer(lease)
+                return Response(serializer.data)
+            except CustomUser.DoesNotExist:
+                return Response(
+                    {'error': 'User not found'}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        else:
+            lease.account_handler = None
+            lease.save()
+            serializer = self.get_serializer(lease)
+            return Response(serializer.data)
+    
     def get_queryset(self):
         # Base queryset with proper relationships
-        queryset = LeaseContract.objects.select_related('client', 'item', 'store').prefetch_related('meter_readings')
+        queryset = LeaseContract.objects.select_related(
+            'client', 'item', 'store', 'account_handler', 'technician'
+        ).prefetch_related('meter_readings')
         
         # Handle search parameter
         search_term = self.request.query_params.get('search')
@@ -1480,7 +1585,9 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(
                 Q(lease_no__icontains=search_term) |
                 Q(client__client_name__icontains=search_term) |
-                Q(item__machine_name__icontains=search_term)
+                Q(item__machine_name__icontains=search_term) |
+                Q(account_handler__first_name__icontains=search_term) |
+                Q(account_handler__last_name__icontains=search_term)
             )
         
         # Handle filter parameter (active/inactive/expiring)
@@ -1504,6 +1611,15 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
         client_id = self.request.query_params.get('client')
         if client_id:
             queryset = queryset.filter(client=client_id)
+        
+        # Handle account handler filter
+        handler_id = self.request.query_params.get('account_handler')
+        if handler_id:
+            queryset = queryset.filter(account_handler=handler_id)
+        
+        # Handle "my leases" filter
+        if self.request.query_params.get('my_leases') == 'true':
+            queryset = queryset.filter(account_handler=self.request.user)
         
         return queryset.order_by('-created_at')
 
@@ -1539,7 +1655,47 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
             # Delete lease
             instance.delete()
 
+class LeaseAssignAccountHandler(APIView):
+    """Bulk assign account handler to multiple leases"""
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request):
+        lease_ids = request.data.get('lease_ids', [])
+        account_handler_id = request.data.get('account_handler_id')
+
+        if not lease_ids:
+            return Response(
+                {"error": "lease_ids is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate account handler
+        account_handler = None
+        if account_handler_id:
+            try:
+                account_handler = CustomUser.objects.get(
+                    id=account_handler_id, 
+                    is_active=True
+                )
+            except CustomUser.DoesNotExist:
+                return Response(
+                    {"error": "Account handler not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+        # Update leases
+        leases = LeaseContract.objects.filter(id__in=lease_ids)
+        updated_count = leases.update(account_handler=account_handler)
+
+        return Response({
+            "status": "success",
+            "updated_count": updated_count,
+            "account_handler_id": account_handler_id,
+            "account_handler_name": account_handler.get_full_name() if account_handler else None
+        })
+
 class LeaseAssignTechnician(APIView):
+    """Keep existing technician assignment functionality"""
     permission_classes = [IsAuthenticated]
 
     def patch(self, request):
@@ -1577,6 +1733,7 @@ class SaleViewSet(viewsets.ModelViewSet):
         client_id = self.request.query_params.get('client')
         client_name = self.request.query_params.get('client_name')
         sale_type = self.request.query_params.get('type')
+        store_inquiry = self.request.query_params.get('store_inquiry')
         
         if client_id:
             queryset = queryset.filter(client=client_id)
@@ -1588,39 +1745,32 @@ class SaleViewSet(viewsets.ModelViewSet):
         if sale_type:
             # Filter through the items' sale_type
             queryset = queryset.filter(items__sale_type=sale_type).distinct()
+        if store_inquiry:
+            # Filter by store inquiry ID
+            queryset = queryset.filter(
+                Q(store_part_inquiry_id=store_inquiry) | 
+                Q(store_acc_inquiry_id=store_inquiry)
+            )
             
         return queryset.order_by('-created_at')
     
     @transaction.atomic
     def create(self, request, *args, **kwargs):
         """Create sale with proper VAT calculations"""
-        print("=== SALE CREATION DEBUG ===")
-        print("Request data:", request.data)
         
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
-        print("Validated data:", serializer.validated_data)
-        
         # Create the sale
         sale = serializer.save()
         
-        print(f"Created sale totals:")
-        print(f"- Subtotal (VAT-exclusive): {sale.subtotal}")
-        print(f"- VAT Total: {sale.vat_total}")
-        print(f"- Total Amount: {sale.total_amount}")
-        print(f"- Add VAT: {sale.add_vat}")
-        print(f"- VAT Rate: {sale.vat_rate}")
+        # Refresh the sale from database to get related objects
+        sale.refresh_from_db()
         
-        # Print item details for debugging
-        for item in sale.items.all():
-            print(f"Item: {item.sale_type} - Unit Price: {item.unit_price}, Qty: {item.quantity}")
-            print(f"  - Subtotal: {item.subtotal}")
-            print(f"  - VAT Amount: {item.vat_amount}")
-            print(f"  - Total Price: {item.total_price}")
-        
-        # Return the sale with calculated totals
+        # Create a new serializer instance with the saved object
         response_serializer = self.get_serializer(sale)
+        
+        # Return the created sale data with 201 status
         headers = self.get_success_headers(response_serializer.data)
         return Response(response_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
     
@@ -1932,7 +2082,7 @@ class LeasePartInquiryViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         queryset = LeasePartInquiry.objects.select_related(
-            'part', 'lease', 'store_inquiry'
+            'part', 'lease', 'store_part_inquiry'
         ).all()
         
         # Filter by lease if provided
@@ -1941,9 +2091,9 @@ class LeasePartInquiryViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(lease=lease_id)
             
         # Filter by store_inquiry if provided
-        store_inquiry_id = self.request.query_params.get('store_inquiry')
-        if store_inquiry_id:
-            queryset = queryset.filter(store_inquiry=store_inquiry_id)
+        store_part_inquiry_id = self.request.query_params.get('store_part_inquiry')
+        if store_part_inquiry_id:
+            queryset = queryset.filter(store_inquiry=store_part_inquiry_id)
             
         return queryset
     
@@ -2023,10 +2173,92 @@ class LeaseAccInquiryViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     
     def get_queryset(self):
+        queryset = LeaseAccInquiry.objects.select_related(
+            'accessory', 'lease', 'store_acc_inquiry'
+        ).all()
+        
+        # Filter by lease if provided
         lease_id = self.request.query_params.get('lease')
         if lease_id:
-            return LeaseAccInquiry.objects.filter(lease=lease_id).select_related('accessory', 'lease')
-        return LeaseAccInquiry.objects.all()
+            queryset = queryset.filter(lease=lease_id)
+            
+        # Filter by store_acc_inquiry if provided
+        store_acc_inquiry_id = self.request.query_params.get('store_acc_inquiry')
+        if store_acc_inquiry_id:
+            queryset = queryset.filter(store_acc_inquiry=store_acc_inquiry_id)
+            
+        return queryset
+    
+    def perform_create(self, serializer):
+        with transaction.atomic():
+            instance = serializer.save()
+            accessory = instance.accessory
+            
+            # Ensure sufficient stock
+            if accessory.quantity < instance.quantity:
+                raise serializer.ValidationError(
+                    f"Insufficient stock. Only {accessory.quantity} units available."
+                )
+            
+            # Update accessory inventory
+            accessory.quantity -= instance.quantity
+            accessory.save()
+            
+            # Update accessory status if needed
+            if accessory.quantity == 0:
+                accessory.acc_status = 'Out of Stock'
+                accessory.save()
+
+    def perform_update(self, serializer):
+        with transaction.atomic():
+            old_instance = self.get_object()
+            new_data = serializer.validated_data
+            new_quantity = new_data.get('quantity', old_instance.quantity)
+            new_accessory = new_data.get('accessory', old_instance.accessory)
+            
+            # Handle accessory change
+            if old_instance.accessory != new_accessory:
+                # Return original accessory to inventory
+                old_accessory = old_instance.accessory
+                old_accessory.quantity += old_instance.quantity
+                old_accessory.save()
+                
+                # Deduct from new accessory
+                if new_accessory.quantity < new_quantity:
+                    raise serializer.ValidationError(
+                        f"Insufficient stock for new accessory. Only {new_accessory.quantity} units available."
+                    )
+                new_accessory.quantity -= new_quantity
+                new_accessory.save()
+            else:
+                # Same accessory, adjust quantity difference
+                quantity_diff = new_quantity - old_instance.quantity
+                if quantity_diff > 0:  # Increasing quantity
+                    if old_instance.accessory.quantity < quantity_diff:
+                        raise serializer.ValidationError(
+                            f"Insufficient stock for increase. Only {old_instance.accessory.quantity} units available."
+                        )
+                    old_instance.accessory.quantity -= quantity_diff
+                    old_instance.accessory.save()
+                elif quantity_diff < 0:  # Decreasing quantity
+                    old_instance.accessory.quantity += abs(quantity_diff)
+                    old_instance.accessory.save()
+            
+            # Update the lease accessory inquiry
+            serializer.save()
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            # Return accessory to inventory
+            accessory = instance.accessory
+            accessory.quantity += instance.quantity
+            
+            # Update status if needed
+            if accessory.quantity > 0 and accessory.acc_status == 'Out of Stock':
+                accessory.acc_status = 'Available'
+            
+            accessory.save()
+            instance.delete()
     
 class MeterReadingViewSet(viewsets.ModelViewSet):
     queryset = MeterReading.objects.all()
@@ -2295,3 +2527,108 @@ class PartInstallationView(APIView):
         part.save()
 
         return Response({"status": "Part installed successfully"})
+
+class PurchaseOrderViewSet(viewsets.ModelViewSet):
+    queryset = PurchaseOrder.objects.all()
+    serializer_class = PurchaseOrderSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        status = self.request.query_params.get('status')
+        supplier = self.request.query_params.get('supplier')
+        
+        queryset = super().get_queryset()
+        
+        if status:
+            queryset = queryset.filter(status=status)
+        if supplier:
+            queryset = queryset.filter(supplier__icontains=supplier)
+        
+        # Filter based on user permissions
+        user = self.request.user
+        if not user.has_permission('purchase_orders', 'read_all'):
+            queryset = queryset.filter(created_by=user)
+        
+        return queryset.select_related(
+            'created_by', 
+            'verified_by_sales_manager', 
+            'verified_by_director',
+        ).prefetch_related('items')
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def submit_for_approval(self, request, pk=None):
+        purchase_order = self.get_object()
+        user = request.user
+        
+        if purchase_order.status != 'Draft':
+            return Response(
+                {'error': 'Only draft purchase orders can be submitted for approval'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        purchase_order.status = 'Submitted'
+        purchase_order.save()
+        
+        # Send notifications to approvers based on user role
+        if user.role == 'Sales Member':
+            # Notify Sales Managers
+            pass
+        elif user.role == 'Sales Manager':
+            # Notify Directors
+            pass
+        
+        return Response({'status': 'Submitted for approval'})
+
+    @action(detail=True, methods=['post'])
+    def verify(self, request, pk=None):
+        purchase_order = self.get_object()
+        user = request.user
+        action = request.data.get('action', 'approve')  # 'approve' or 'reject'
+        
+        if not purchase_order.can_verify(user):
+            return Response(
+                {'error': 'You are not authorized to verify this purchase order'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if action == 'approve':
+            if user.role == 'Sales Manager':
+                purchase_order.status = 'Approved by Sales Manager'
+                purchase_order.verified_by_sales_manager = user
+            elif user.role == 'Director':
+                purchase_order.status = 'Approved by Director'
+                purchase_order.verified_by_director = user
+        else:  # reject
+            if user.role == 'Sales Manager':
+                purchase_order.status = 'Rejected by Sales Manager'
+                purchase_order.verified_by_sales_manager = user
+            elif user.role == 'Director':
+                purchase_order.status = 'Rejected by Director'
+                purchase_order.verified_by_director = user
+        
+        purchase_order.save()
+        return Response({'status': purchase_order.status})
+
+class PurchaseOrderPDFView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        purchase_order = get_object_or_404(PurchaseOrder, pk=pk)
+        
+        # Render HTML template with context
+        template = 'purchase_order_pdf.html'
+        context = {'purchase_order': purchase_order}
+        html = render_to_string(template, context)
+        
+        # Create PDF response
+        response = HttpResponse(content_type='application/pdf')
+        response['Content-Disposition'] = f'filename="purchase_order_{purchase_order.po_number}.pdf"'
+        
+        # Generate PDF
+        pisa_status = pisa.CreatePDF(html, dest=response)
+        if pisa_status.err:
+            return HttpResponse('PDF generation error', status=500)
+        return response

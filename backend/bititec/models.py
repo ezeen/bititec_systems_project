@@ -118,6 +118,8 @@ class CustomUser(AbstractUser):
                 'leases': ['read', 'create', 'update', 'delete'],
                 'clients': ['read', 'create', 'update', 'delete'],
                 'inquiries': ['read', 'create', 'update', 'delete'],
+                'purchase_orders': ['read', 'create', 'update', 'delete', 'verify'],
+                'quotation': ['read', 'create', 'update', 'delete'],
             },
             'Super Admin': {
                 'sales': ['read', 'create', 'update', 'delete'],
@@ -126,13 +128,19 @@ class CustomUser(AbstractUser):
                 'leases': ['read', 'create', 'update', 'delete'],
                 'clients': ['read', 'create', 'update', 'delete'],
                 'inquiries': ['read', 'create', 'update', 'delete'],
+                'purchase_orders': ['read', 'create', 'update', 'delete', 'verify'],
+                'quotation': ['read', 'create', 'update', 'delete'],
             },
             'Sales Manager': {
                 'sales': ['read', 'create', 'update', 'delete'],
-                'clients': ['read', 'create', 'update', 'delete']
+                'clients': ['read', 'create', 'update', 'delete'],
+                'purchase_orders': ['read', 'create', 'update', 'verify'],
+                'quotation': ['read', 'create', 'update'],
             },
             'Sales Member': {
-                'sales': ['read', 'create', 'update']
+                'sales': ['read', 'create', 'update'],
+                'purchase_orders': ['read', 'create', 'update'],
+                'quotation': ['read', 'create', 'update'],
             },
             'Inventory Manager': {
                 'inventory': ['read', 'create', 'update', 'delete'],
@@ -821,6 +829,7 @@ class Call(models.Model):
     technician = models.ManyToManyField(CustomUser, related_name='calls')
     contract_type = models.CharField(max_length=100)
     service_type = models.CharField(max_length=50, choices=SERVICE_TYPE_CHOICES, default='Hardware & Software Support')
+    lpo = models.TextField(blank=True, default='')  
     client = models.ForeignKey(Client, on_delete=models.PROTECT, null=True, blank=True)
     reported_by = models.CharField(max_length=255)
     reported_date = models.DateTimeField(default=timezone.now)
@@ -881,7 +890,7 @@ class Call(models.Model):
         random_num = random.randint(10000, 99999)
         return f"TN-{now.month:02d}/{now.strftime('%y')}/{random_num}"
     
-class StoreInquiry(models.Model):
+class StorePartInquiry(models.Model):
     STATUS_CHOICES = [
         ('Pending', 'Pending'),
         ('Issued', 'Issued'),
@@ -889,7 +898,7 @@ class StoreInquiry(models.Model):
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    service_call = models.ForeignKey(Call, on_delete=models.CASCADE, related_name='store_inquiries')
+    service_call = models.ForeignKey(Call, on_delete=models.CASCADE, related_name='part_store_inquiries')  # Fixed: unique related_name
     part_name = models.CharField(max_length=255)
     quantity = models.PositiveIntegerField()
     requested_by = models.ForeignKey(CustomUser, on_delete=models.PROTECT)
@@ -897,7 +906,30 @@ class StoreInquiry(models.Model):
     unit_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     add_vat = models.BooleanField(default=False)
     is_issued = models.BooleanField(default=False)
-    issued_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='issued_inquiries')
+    issued_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='issued_part_inquiries')  # Fixed: unique related_name
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-requested_at']
+
+class StoreAccessoryInquiry(models.Model):
+    STATUS_CHOICES = [
+        ('Pending', 'Pending'),
+        ('Issued', 'Issued'),
+        ('Rejected', 'Rejected')
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    service_call = models.ForeignKey(Call, on_delete=models.CASCADE, related_name='accessory_store_inquiries')  # Fixed: unique related_name
+    acc_name = models.CharField(max_length=255)
+    quantity = models.PositiveIntegerField()
+    requested_by = models.ForeignKey(CustomUser, on_delete=models.PROTECT)
+    requested_at = models.DateTimeField(auto_now_add=True)
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    add_vat = models.BooleanField(default=False)
+    is_issued = models.BooleanField(default=False)
+    issued_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='issued_accessory_inquiries')  # Fixed: unique related_name
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
     notes = models.TextField(blank=True)
 
@@ -950,7 +982,25 @@ class LeaseContract(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     store = models.ForeignKey(Store, on_delete=models.PROTECT)
-    technician = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_leases', limit_choices_to={'role__in': ['Technician', 'Technician Manager']})
+    account_handler = models.ForeignKey(
+        CustomUser, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='handled_leases',
+        help_text="User responsible for managing this lease account"
+    )
+    
+    # Keep technician field for backward compatibility if needed
+    technician = models.ForeignKey(
+        CustomUser, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='assigned_leases', 
+        limit_choices_to={'role__in': ['Technician', 'Technician Manager']},
+        help_text="Technician assigned for maintenance/support"
+    )
 
     def __str__(self):
         return f"{self.lease_no} - {self.client.client_name}"
@@ -1056,6 +1106,7 @@ class Sale(models.Model):
     local_client_name = models.CharField(max_length=255, blank=True, null=True)
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     sale_no = models.CharField(max_length=50, unique=True)
+    lpo = models.TextField(blank=True, default='')  
     client = models.ForeignKey(Client, on_delete=models.PROTECT, null=True, blank=True)
     sale_date = models.DateField(default=timezone.now)
     notes = models.TextField(blank=True)
@@ -1066,7 +1117,8 @@ class Sale(models.Model):
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)  # Sum of all item subtotals (VAT-exclusive)
     vat_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)  # Total VAT amount
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)  # Final total
-    store_inquiry = models.ForeignKey(StoreInquiry, on_delete=models.SET_NULL, null=True, blank=True)
+    store_part_inquiry = models.ForeignKey(StorePartInquiry, on_delete=models.SET_NULL, null=True, blank=True, related_name='sales')
+    store_acc_inquiry = models.ForeignKey(StoreAccessoryInquiry, on_delete=models.SET_NULL, null=True, blank=True, related_name='sales')
 
     def calculate_totals(self):
         """Recalculate all totals for this sale"""
@@ -1131,6 +1183,7 @@ class Delivery(models.Model):
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lpo = models.TextField(blank=True, default='')
     delivery_type = models.CharField(max_length=20, choices=DELIVERY_TYPE_CHOICES, default='Sale')
     sale = models.ForeignKey(Sale, on_delete=models.PROTECT, related_name='deliveries', null=True, blank=True)
     lease = models.ForeignKey(LeaseContract, on_delete=models.PROTECT, related_name='deliveries', null=True, blank=True)
@@ -1255,12 +1308,12 @@ class ChatMessage(models.Model):
 class LeasePartInquiry(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     lease = models.ForeignKey(LeaseContract, on_delete=models.CASCADE, related_name='part_inquiries')
-    store_inquiry = models.ForeignKey(StoreInquiry, on_delete=models.CASCADE, related_name='lease_part_inquiries', null=True, blank=True)
+    store_part_inquiry = models.ForeignKey(StorePartInquiry, on_delete=models.CASCADE, related_name='lease_part_inquiries', null=True, blank=True)
     part = models.ForeignKey(Part, on_delete=models.PROTECT)
     quantity = models.PositiveIntegerField()
     unit_amount = models.DecimalField(max_digits=10, decimal_places=2)  # Base unit amount without VAT
     subtotal = models.DecimalField(max_digits=10, decimal_places=2, editable=False)  # unit_amount * quantity
-    vat_rate = models.DecimalField(max_digits=5, decimal_places=4, default=0.16)  # VAT rate as percentage
+    vat_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal('0.16'))
     vat_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # VAT amount
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, editable=False)  # Final total with VAT
     apply_vat = models.BooleanField(default=False)
@@ -1290,14 +1343,34 @@ class LeasePartInquiry(models.Model):
 class LeaseAccInquiry(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     lease = models.ForeignKey(LeaseContract, on_delete=models.CASCADE, related_name='acc_inquiries')
+    store_acc_inquiry = models.ForeignKey(StoreAccessoryInquiry, on_delete=models.CASCADE, related_name='lease_acc_inquiries', null=True, blank=True)
     accessory = models.ForeignKey(Accessory, on_delete=models.PROTECT)
     quantity = models.PositiveIntegerField()
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    vat = models.DecimalField(max_digits=10, decimal_places=2)
+    unit_amount = models.DecimalField(max_digits=10, decimal_places=2)  # Price per unit
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, editable=False)  # unit_amount * quantity
+    vat_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal('0.16'))
+    vat_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # VAT amount
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2, editable=False)  # Final total with VAT
+    apply_vat = models.BooleanField(default=False)
     date = models.DateField()
     is_paid = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def calculate_totals(self):
+        """Calculate subtotal, VAT, and total amount"""
+        self.subtotal = self.unit_amount * self.quantity
+        
+        if self.apply_vat:
+            self.vat_amount = self.subtotal * self.vat_rate
+        else:
+            self.vat_amount = Decimal('0')
+            
+        self.total_amount = self.subtotal + self.vat_amount
+
+    def save(self, *args, **kwargs):
+        self.calculate_totals()
+        super().save(*args, **kwargs)
 
     class Meta:
         ordering = ['-date']
@@ -1409,4 +1482,92 @@ class TransferItem(models.Model):
     accessory = models.ForeignKey(Accessory, on_delete=models.CASCADE, null=True, blank=True)
     quantity = models.PositiveIntegerField(default=1)
     initial_quantity = models.PositiveIntegerField(default=0)  # Original quantity at transfer time
+
+class PurchaseOrder(models.Model):
+    STATUS_CHOICES = [
+        ('Draft', 'Draft'),
+        ('Submitted', 'Submitted'),
+        ('Approved by Sales Manager', 'Approved by Sales Manager'),
+        ('Rejected by Sales Manager', 'Rejected by Sales Manager'),
+        ('Approved by Director', 'Approved by Director'),
+        ('Rejected by Director', 'Rejected by Director'),
+        ('Ordered', 'Ordered'),
+        ('Cancelled', 'Cancelled'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    po_number = models.CharField(max_length=50, unique=True)
+    supplier = models.CharField(max_length=255)
+    supplier_address = models.TextField(blank=True)
+    created_by = models.ForeignKey(CustomUser, on_delete=models.PROTECT, related_name='created_purchase_orders')
+    verified_by_sales_manager = models.ForeignKey(
+        CustomUser, 
+        on_delete=models.PROTECT, 
+        null=True, 
+        blank=True,
+        related_name='verified_sales_purchase_orders'
+    )
+    verified_by_director = models.ForeignKey(
+        CustomUser, 
+        on_delete=models.PROTECT, 
+        null=True, 
+        blank=True,
+        related_name='verified_director_purchase_orders'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    required_by_date = models.DateField()
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    vat_rate = models.DecimalField(max_digits=5, decimal_places=2, default=16)
+    vat_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    include_vat = models.BooleanField(default=True)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='Draft')
+    notes = models.TextField(blank=True)
+    uploaded_pdf = models.FileField(upload_to='purchase_orders/', null=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        if not self.po_number:
+            self.po_number = self.generate_po_number()
+        super().save(*args, **kwargs)
+
+    def generate_po_number(self):
+        now = timezone.now()
+        random_num = random.randint(10000, 99999)
+        return f"PO-{now.month:02d}/{now.strftime('%y')}/{random_num}"
+
+    def can_verify(self, user):
+        """Check if user can verify this PO based on their role and current status"""
+        if self.status == 'Submitted':
+            if user.role == 'Sales Manager':
+                return True
+        elif self.status == 'Approved by Sales Manager':
+            if user.role == 'Director':
+                return True
+        return False
+
+class PurchaseOrderItem(models.Model):
+    ITEM_TYPE_CHOICES = [
+        ('MachineType', 'Machine Type'),
+        ('PartType', 'Part Type'),
+        ('AccessoryType', 'Accessory Type'),
+        ('Custom', 'Custom Item'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.CASCADE, related_name='items')
+    item_type = models.CharField(max_length=20, choices=ITEM_TYPE_CHOICES)
+    item_id = models.UUIDField(null=True, blank=True)
+    item_name = models.CharField(max_length=255)
+    item_brand = models.CharField(max_length=255, blank=True)
+    item_code = models.CharField(max_length=255, blank=True)
+    quantity = models.PositiveIntegerField(default=1)
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+    vat_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    total_price = models.DecimalField(max_digits=10, decimal_places=2)
+    description = models.TextField(blank=True)
+
+    def save(self, *args, **kwargs):
+        self.total_price = self.quantity * self.unit_price
+        super().save(*args, **kwargs)
 
