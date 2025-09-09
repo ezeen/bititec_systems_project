@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Accessory, AccessoryType, Call, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, KeyAudit, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, Machine, MachineType, MeterReading, Part, PartType, Quotation, QuotationItem, Sale, SaleItem, SecurityEvent, ServiceCallToken, Store, StoreInquiry
+from .models import Accessory, AccessoryType, Call, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, KeyAudit, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, Machine, MachineType, MeterReading, Part, PartType, Quotation, QuotationItem, Sale, SaleItem, SecurityEvent, ServiceCallToken, Store, StoreAccessoryInquiry, StorePartInquiry
 from django.utils.html import format_html
 
 class CustomUserAdmin(UserAdmin):
@@ -184,7 +184,7 @@ class SaleAdmin(admin.ModelAdmin):
     search_fields = ('sale_no', 'client__client_name', 'local_client_name')
     readonly_fields = ('sale_no', 'subtotal', 'vat_total', 'total_amount', 'created_at', 'updated_at')
     date_hierarchy = 'sale_date'
-    raw_id_fields = ('client', 'store_inquiry')
+    raw_id_fields = ('client',)  # Removed 'store_inquiry' as it doesn't exist in Sale model
     inlines = [SaleItemInline]
     
     fieldsets = (
@@ -200,7 +200,7 @@ class SaleAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
         ('Additional Information', {
-            'fields': ('notes', 'store_inquiry'),
+            'fields': ('notes', 'store_part_inquiry', 'store_acc_inquiry'),  # Using correct field names
             'classes': ('collapse',)
         }),
         ('Metadata', {
@@ -302,11 +302,11 @@ class LeasePartInquiryAdmin(admin.ModelAdmin):
     search_fields = ('lease__lease_no', 'part__part_name')
     date_hierarchy = 'date'
     readonly_fields = ('subtotal', 'vat_amount', 'total_amount', 'created_at', 'updated_at')
-    raw_id_fields = ('lease', 'part', 'store_inquiry')
+    raw_id_fields = ('lease', 'part', 'store_part_inquiry')  # Fixed: using correct field name
     
     fieldsets = (
         ('Basic Information', {
-            'fields': ('lease', 'part', 'store_inquiry', 'quantity', 'date')
+            'fields': ('lease', 'part', 'store_part_inquiry', 'quantity', 'date')  # Fixed: using correct field name
         }),
         ('Pricing & VAT', {
             'fields': ('unit_amount', 'apply_vat', 'vat_rate', 'subtotal', 'vat_amount', 'total_amount'),
@@ -331,11 +331,12 @@ class LeasePartInquiryAdmin(admin.ModelAdmin):
 
 @admin.register(LeaseAccInquiry)
 class LeaseAccInquiryAdmin(admin.ModelAdmin):
-    list_display = ('id', 'lease', 'accessory', 'quantity', 'amount', 'vat', 'date', 'is_paid')
-    list_filter = ('is_paid', 'date')
-    search_fields = ('lease__lease_number', 'accessory__name')
+    # Fixed: using correct field names from the model
+    list_display = ('id', 'lease', 'accessory', 'quantity', 'unit_amount', 'total_amount', 'date', 'is_paid')
+    list_filter = ('is_paid', 'date', 'apply_vat')  # Fixed: using correct field name
+    search_fields = ('lease__lease_no', 'accessory__acc_name')  # Fixed: using correct field name
     date_hierarchy = 'date'
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at', 'subtotal', 'vat_amount', 'total_amount')
 
 @admin.register(ClientMachine)
 class ClientMachineAdmin(admin.ModelAdmin):
@@ -344,11 +345,19 @@ class ClientMachineAdmin(admin.ModelAdmin):
     list_filter = ('created_at',)
     readonly_fields = ('created_at',)
 
-@admin.register(StoreInquiry)
-class StoreInquiryAdmin(admin.ModelAdmin):
+@admin.register(StorePartInquiry)
+class StorePartInquiryAdmin(admin.ModelAdmin):
     list_display = ('part_name', 'quantity', 'status', 'requested_by', 'requested_at')
     list_filter = ('status', 'requested_at')
     search_fields = ('part_name', 'service_call__ticket_no')
+    raw_id_fields = ('service_call', 'requested_by', 'issued_by')
+    readonly_fields = ('requested_at',)
+
+@admin.register(StoreAccessoryInquiry)
+class StoreAccessoryInquiryAdmin(admin.ModelAdmin):
+    list_display = ('acc_name', 'quantity', 'status', 'requested_by', 'requested_at')
+    list_filter = ('status', 'requested_at')
+    search_fields = ('acc_name', 'service_call__ticket_no')
     raw_id_fields = ('service_call', 'requested_by', 'issued_by')
     readonly_fields = ('requested_at',)
 

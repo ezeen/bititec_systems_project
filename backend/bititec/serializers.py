@@ -1,6 +1,7 @@
+from decimal import Decimal
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StoreInquiry, Transfer, TransferItem
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, PurchaseOrder, PurchaseOrderItem, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem
 from django.db.models import Sum
 from dateutil.relativedelta import relativedelta
 from django.utils import timezone
@@ -347,6 +348,19 @@ class LeaseContractSerializer(serializers.ModelSerializer):
     client = ClientSerializer(read_only=True)
     meter_readings = MeterReadingSerializer(many=True, read_only=True)
     missing_readings = serializers.SerializerMethodField()
+    # Account handler serializer fields
+    account_handler = UserSerializer(read_only=True)
+    account_handler_id = serializers.PrimaryKeyRelatedField(
+        queryset=CustomUser.objects.filter(is_active=True),
+        write_only=True,
+        source='account_handler',
+        required=False,
+        allow_null=True
+    )
+    account_handler_name = serializers.CharField(source='account_handler.get_full_name', read_only=True)
+    account_handler_email = serializers.CharField(source='account_handler.email', read_only=True)
+    
+    # Technician serializer fields (keep for backward compatibility)
     technician = UserSerializer(read_only=True)
     technician_id = serializers.PrimaryKeyRelatedField(
         queryset=CustomUser.objects.filter(
@@ -364,7 +378,9 @@ class LeaseContractSerializer(serializers.ModelSerializer):
             'id', 'client', 'client_name', 'client_location', 'department', 
             'item', 'item_id', 'item_name', 'client_id',
             'serial_no', 'store', 'store_name', 'from_date', 'to_date', 'add_vat', 'add_myq',
-            'billed_myq', 'is_active', 'contract_type', 'lease_no', 'created_at', 'client', 'meter_readings', 'missing_readings', 'technician', 'technician_id'
+            'billed_myq', 'is_active', 'contract_type', 'lease_no', 'created_at', 'client', 
+            'meter_readings', 'missing_readings', 'technician', 'technician_id',
+            'account_handler', 'account_handler_id', 'account_handler_name', 'account_handler_email'
         ]
         extra_kwargs = {
             'created_at': {'read_only': True},
@@ -434,16 +450,21 @@ class LeasePartInquirySerializer(serializers.ModelSerializer):
         write_only=True,
         source='lease'
     )
-    store_inquiry_id = serializers.PrimaryKeyRelatedField(
-        queryset=StoreInquiry.objects.all(),
+    store_part_inquiry_id = serializers.PrimaryKeyRelatedField(
+        queryset=StorePartInquiry.objects.all(),
         write_only=True,
-        source='store_inquiry',
+        source='store_part_inquiry',
         required=False,
     )
 
     subtotal = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     vat_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     total_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    vat_rate = serializers.DecimalField(
+        max_digits=5, 
+        decimal_places=4, 
+        default=Decimal('0.16')
+    )
     
     class Meta:
         model = LeasePartInquiry
@@ -451,7 +472,7 @@ class LeasePartInquirySerializer(serializers.ModelSerializer):
             'id', 'lease', 'part', 'quantity', 'unit_amount', 'subtotal',
             'vat_rate', 'vat_amount', 'total_amount', 'apply_vat', 'date', 
             'is_paid', 'created_at', 'updated_at', 'part_id', 'lease_id', 
-            'store_inquiry_id'
+            'store_part_inquiry_id'
         ]
         read_only_fields = ['created_at', 'updated_at', 'subtotal', 'vat_amount', 'total_amount']
 
@@ -571,6 +592,17 @@ class LeaseAccInquirySerializer(serializers.ModelSerializer):
     accessory = BasicAccessorySerializer(read_only=True)
     lease = LeaseContractSerializer(read_only=True)
     accessory_id = serializers.PrimaryKeyRelatedField(queryset=Accessory.objects.all(), write_only=True, source='accessory')
+
+    store_acc_inquiry_id = serializers.PrimaryKeyRelatedField(
+        queryset=StorePartInquiry.objects.all(),
+        write_only=True,
+        source='store_acc_inquiry',
+        required=False,
+    )
+
+    subtotal = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    vat_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    total_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     
     class Meta:
         model = LeaseAccInquiry
@@ -736,7 +768,7 @@ class CallSerializer(serializers.ModelSerializer):
             'comments', 'status', 'department', 'is_checked', 'director_comment', 'ticket_no',
             'spare_description', 'created_at', 'walk_in_machine',
             'walk_in_machine_name', 'walk_in_machine_type', 'walk_in_serial_no', 'technician_manager_approval', 'client_verification',
-            'finish_time', 'start_time'
+            'finish_time', 'start_time', 'lpo'
         ]
         extra_kwargs = {
             'created_at': {'read_only': True},
@@ -895,16 +927,44 @@ class CallSerializer(serializers.ModelSerializer):
             return obj.item.store.store_name
         return ""
     
-class StoreInquirySerializer(serializers.ModelSerializer):
+class StorePartInquirySerializer(serializers.ModelSerializer):
     requested_by = UserSerializer(read_only=True)
     lease_part_inquiries = LeasePartInquirySerializer(many=True, read_only=True)
     
     class Meta:
-        model = StoreInquiry
+        model = StorePartInquiry
         fields = [
             'id', 'service_call', 'part_name', 'quantity', 'requested_by', 
             'requested_at', 'unit_price', 'add_vat', 'is_issued', 'issued_by', 
             'status', 'notes', 'lease_part_inquiries'
+        ]
+        read_only_fields = ['requested_at', 'issued_by', 'status']
+
+    def update(self, instance, validated_data):
+        # Handle status update based on is_issued
+        is_issued = validated_data.get('is_issued', instance.is_issued)
+        
+        if is_issued and not instance.is_issued:
+            # First time being issued
+            validated_data['status'] = 'Issued'
+            validated_data['issued_by'] = self.context['request'].user
+        elif not is_issued and instance.is_issued:
+            # Being un-issued
+            validated_data['status'] = 'Pending'
+            # Don't clear issued_by to maintain audit trail
+        
+        return super().update(instance, validated_data)
+    
+class StoreAccessoryInquirySerializer(serializers.ModelSerializer):
+    requested_by = UserSerializer(read_only=True)
+    lease_acc_inquiries = LeaseAccInquirySerializer(many=True, read_only=True)
+    
+    class Meta:
+        model = StoreAccessoryInquiry  
+        fields = [
+            'id', 'service_call', 'acc_name', 'quantity', 'requested_by', 
+            'requested_at', 'unit_price', 'add_vat', 'is_issued', 'issued_by', 
+            'status', 'notes', 'lease_acc_inquiries'  
         ]
         read_only_fields = ['requested_at', 'issued_by', 'status']
 
@@ -990,13 +1050,28 @@ class SaleSerializer(serializers.ModelSerializer):
         required=False,
         source='client'  
     )
+
+    store_part_inquiry_id = serializers.PrimaryKeyRelatedField(
+        queryset=StorePartInquiry.objects.all(),
+        write_only=True,
+        required=False,
+        source='store_part_inquiry'
+    )
+    
+    store_acc_inquiry_id = serializers.PrimaryKeyRelatedField(
+        queryset=StoreAccessoryInquiry.objects.all(),
+        write_only=True,
+        required=False,
+        source='store_acc_inquiry'
+    )
     
     class Meta:
         model = Sale
         fields = [
             'id', 'sale_no', 'client', 'client_id', 'items', 'add_vat', 'vat_rate',
             'client_name', 'client_location', 'sale_date', 'notes', 'created_at',
-            'subtotal', 'vat_total', 'total_amount', 'items_count', 'sale_type'
+            'subtotal', 'vat_total', 'total_amount', 'items_count', 'sale_type', 'lpo',
+            'store_part_inquiry_id', 'store_acc_inquiry_id' 
         ]
         read_only_fields = ['sale_no', 'created_at', 'subtotal', 'vat_total', 'total_amount']
 
@@ -1220,13 +1295,34 @@ class ChatGroupSerializer(serializers.ModelSerializer):
         return None
 
 class LeaseAccInquirySerializer(serializers.ModelSerializer):
-    accessory = AccessorySerializer(read_only=True)
+    accessory = BasicAccessorySerializer(read_only=True)
+    lease = LeaseContractSerializer(read_only=True)
     accessory_id = serializers.PrimaryKeyRelatedField(queryset=Accessory.objects.all(), write_only=True, source='accessory')
+    lease_id = serializers.PrimaryKeyRelatedField(
+        queryset=LeaseContract.objects.all(),
+        write_only=True,
+        source='lease'
+    )
+    store_acc_inquiry_id = serializers.PrimaryKeyRelatedField(
+        queryset=StoreAccessoryInquiry.objects.all(),
+        write_only=True,
+        source='store_acc_inquiry',
+        required=False,
+    )
+
+    subtotal = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    vat_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    total_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     
     class Meta:
         model = LeaseAccInquiry
-        fields = '__all__'
-        read_only_fields = ['created_at', 'updated_at']
+        fields = [
+            'id', 'lease', 'accessory', 'quantity', 'unit_amount', 'subtotal',
+            'vat_rate', 'vat_amount', 'total_amount', 'apply_vat', 'date', 
+            'is_paid', 'created_at', 'updated_at', 'accessory_id', 'lease_id', 
+            'store_acc_inquiry_id'
+        ]
+        read_only_fields = ['created_at', 'updated_at', 'subtotal', 'vat_amount', 'total_amount']
 
 class QuotationItemSerializer(serializers.ModelSerializer):
     class Meta:
@@ -1416,5 +1512,70 @@ class TransferSerializer(serializers.ModelSerializer):
             instance.items.all().delete()
             for item_data in items_data:
                 TransferItem.objects.create(transfer=instance, **item_data)
+        
+        return instance
+    
+class PurchaseOrderItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PurchaseOrderItem
+        fields = '__all__'
+        read_only_fields = ['purchase_order']
+
+class PurchaseOrderSerializer(serializers.ModelSerializer):
+    items = PurchaseOrderItemSerializer(many=True)
+    created_by = UserSerializer(read_only=True)
+    verified_by_sales_manager = UserSerializer(read_only=True)
+    verified_by_director = UserSerializer(read_only=True)
+    
+    class Meta:
+        model = PurchaseOrder
+        fields = [
+            'id', 'po_number', 'supplier', 'supplier_address',
+            'created_by', 'created_at', 'updated_at', 'required_by_date', 'subtotal',
+            'vat_rate', 'vat_amount', 'total_amount', 'include_vat', 'status', 'notes',
+            'items', 'verified_by_sales_manager', 'verified_by_director', 'uploaded_pdf'
+        ]
+        read_only_fields = ['created_by', 'created_at', 'updated_at', 'po_number', 
+                           'verified_by_sales_manager', 'verified_by_director', 'status']
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items')
+        validated_data['created_by'] = self.context['request'].user
+        purchase_order = PurchaseOrder.objects.create(**validated_data)
+        
+        for item_data in items_data:
+            PurchaseOrderItem.objects.create(purchase_order=purchase_order, **item_data)
+        
+        return purchase_order
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', [])
+        instance = super().update(instance, validated_data)
+        
+        # Update items
+        current_items = list(instance.items.all())
+        updated_items = []
+        
+        for item_data in items_data:
+            item_id = item_data.get('id', None)
+            if item_id:
+                # Update existing item
+                item = next((i for i in current_items if str(i.id) == item_id), None)
+                if item:
+                    for attr, value in item_data.items():
+                        setattr(item, attr, value)
+                    item.save()
+                    updated_items.append(item.id)
+                else:
+                    # ID provided but not found - create new
+                    PurchaseOrderItem.objects.create(purchase_order=instance, **item_data)
+            else:
+                # New item
+                PurchaseOrderItem.objects.create(purchase_order=instance, **item_data)
+        
+        # Delete items not in the update
+        for item in current_items:
+            if item.id not in updated_items:
+                item.delete()
         
         return instance
