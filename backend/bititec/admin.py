@@ -4,11 +4,12 @@ from .models import Accessory, AccessoryType, Call, ChatGroup, ChatMessage, Clie
 from django.utils.html import format_html
 
 class CustomUserAdmin(UserAdmin):
-    list_display = ('email', 'get_full_name', 'role', 'active', 'is_staff', 'profile_image_tag', 'failed_login_attempts', 'is_locked_display')
-    list_filter = ('role', 'active', 'is_staff', 'failed_login_attempts')
+    list_display = ('email', 'get_full_name', 'role', 'active', 'is_staff', 'profile_image_tag', 'failed_login_attempts', 'is_locked_display', 'stores_display')
+    list_filter = ('role', 'active', 'is_staff', 'failed_login_attempts', 'stores')
     search_fields = ('email', 'firstname', 'lastname')
     ordering = ('email',)
-    readonly_fields = ('profile_image_tag', 'is_locked_display', 'keys_granted_at', 'last_failed_login')
+    readonly_fields = ('profile_image_tag', 'is_locked_display', 'keys_granted_at', 'last_failed_login', 'stores_display')
+    filter_horizontal = ('stores',)  # Add this for better UI for many-to-many field
 
     def profile_image_tag(self, obj):
         if obj.profile_image:
@@ -21,9 +22,18 @@ class CustomUserAdmin(UserAdmin):
     is_locked_display.short_description = 'Account Locked'
     is_locked_display.boolean = True
     
+    def stores_display(self, obj):
+        """Display assigned stores in a comma-separated format"""
+        stores = obj.stores.all()
+        if stores:
+            return ", ".join([f"{store.store_name} ({store.store_location})" for store in stores])
+        return "No stores assigned"
+    stores_display.short_description = 'Assigned Stores'
+    
     fieldsets = (
         (None, {'fields': ('email', 'password')}),
         ('Personal info', {'fields': ('firstname', 'lastname', 'phonenumber', 'role', 'profile_image', 'profile_image_tag')}),
+        ('Store Assignments', {'fields': ('stores', 'stores_display')}),  # Add this section
         ('Permissions', {'fields': ('active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
         ('Security Settings', {
             'fields': ('failed_login_attempts', 'locked_until', 'last_failed_login', 'security_token', 'is_locked_display'),
@@ -40,7 +50,7 @@ class CustomUserAdmin(UserAdmin):
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
-            'fields': ('email', 'firstname', 'lastname', 'phonenumber', 'role', 'password1', 'password2', 'profile_image', 'active'),
+            'fields': ('email', 'firstname', 'lastname', 'phonenumber', 'role', 'password1', 'password2', 'profile_image', 'active', 'stores'),
         }),
     )
     
@@ -152,15 +162,25 @@ class ClientAdmin(admin.ModelAdmin):
 
 @admin.register(Call)
 class CallAdmin(admin.ModelAdmin):
-    list_display = ('ticket_no', 'client', 'item', 'status', 'reported_date', 'get_technicians')
+    list_display = ('ticket_no', 'client', 'item', 'status', 'reported_date', 'get_technicians', 'images_preview')
     list_filter = ('status', 'reported_date', 'department')
     search_fields = ('ticket_no', 'client__client_name', 'item__machine_name')
     filter_horizontal = ('technician',)
-    readonly_fields = ('created_at', 'updated_at', 'get_technicians')
+    readonly_fields = ('created_at', 'updated_at', 'get_technicians', 'images_preview')
     
     def get_technicians(self, obj):
         return ", ".join([f"{t.firstname} {t.lastname}" for t in obj.technician.all()]) if obj.technician.exists() else "No technicians assigned"
     get_technicians.short_description = "Technicians"
+
+    def images_preview(self, obj):
+        if obj.images:
+            html = '<div style="display: flex; flex-wrap: wrap; gap: 10px;">'
+            for image_url in obj.images:
+                html += f'<img src="{image_url}" width="100" height="100" style="object-fit: cover; border-radius: 5px;" />'
+            html += '</div>'
+            return format_html(html)
+        return "No images"
+    images_preview.short_description = "Images Preview"
 
 @admin.register(LeaseContract)
 class LeaseContractAdmin(admin.ModelAdmin):

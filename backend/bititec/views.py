@@ -1,4 +1,5 @@
 from asyncio.log import logger
+import uuid
 from django.core.cache import cache
 import hashlib
 import os
@@ -10,7 +11,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions, status, filters, viewsets
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
-
+from .permissions import StorePermissionMixin
 from .middleware import SecurityUtils
 from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, KeyAudit, PurchaseOrder, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem
 from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, PurchaseOrderSerializer, QuotationSerializer, SaleSerializer, StorePartInquirySerializer, StoreAccessoryInquirySerializer, TransferSerializer, UserSerializer, RegisterSerializer, StoreSerializer
@@ -37,6 +38,8 @@ from django.utils.decorators import method_decorator
 from django.middleware.csrf import get_token
 from rest_framework import permissions, viewsets
 from django.template.loader import render_to_string
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
 from xhtml2pdf import pisa
 
 logger = logging.getLogger(__name__)
@@ -511,6 +514,7 @@ def grant_key_access(request):
     key = request.data.get('key')
     actions = request.data.get('actions', [])
     reason = request.data.get('reason', '')
+    store_ids = request.data.get('store_ids', [])
     
     if not all([user_id, key, actions]):
         return Response(
@@ -537,9 +541,20 @@ def grant_key_access(request):
     
     try:
         user = CustomUser.objects.get(id=user_id)
+
+        if user.keys is None:
+            user.keys = {}
         
-        # Grant key access
-        user.grant_key_access(key, actions, request.user, reason)
+        # Grant key access with store restrictions
+        user.keys[key] = {
+            'actions': actions,
+            'store_ids': store_ids,
+            'granted_by': str(request.user.id),
+            'granted_at': timezone.now().isoformat(),
+            'reason': reason
+        }
+        
+        user.save()
         
         # Create audit record
         KeyAudit.objects.create(
@@ -768,7 +783,7 @@ class StandardPagination(PageNumberPagination):
     page_size_query_param = 'page_size'
     max_page_size = 100
 
-class MachineViewSet(viewsets.ModelViewSet):
+class MachineViewSet(StorePermissionMixin, viewsets.ModelViewSet):
     serializer_class = MachineSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardPagination
@@ -845,7 +860,7 @@ class MachineViewSet(viewsets.ModelViewSet):
         self.perform_update(serializer)
         return Response(serializer.data)
     
-class PartViewSet(viewsets.ModelViewSet):
+class PartViewSet(StorePermissionMixin, viewsets.ModelViewSet):
     serializer_class = PartSerializer  
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardPagination
@@ -890,7 +905,7 @@ class PartViewSet(viewsets.ModelViewSet):
 
         return queryset.order_by('-created_at')
     
-class AccessoryViewSet(viewsets.ModelViewSet):
+class AccessoryViewSet(StorePermissionMixin, viewsets.ModelViewSet):
     serializer_class = AccessorySerializer  
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardPagination
@@ -1403,6 +1418,195 @@ class CallViewSet(viewsets.ModelViewSet):
         response_data['previous_status'] = old_status
         
         return Response(response_data)
+    
+    @action(detail=True, methods=['post'])
+    def upload_images(self, request, pk=None):
+        """Upload images for a service call"""
+        call = self.get_object()
+        
+        # Check permissions
+        if not self.has_edit_permission(call, request.user):
+            return Response(
+                {'error': 'You do not have permission to upload images for this call'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check if call status allows image upload
+        if call.status not in ['In Progress', 'Completed']:
+            return Response(
+                {'error': 'Images can only be uploaded for calls with status "In Progress" or "Completed"'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        images = request.FILES.getlist('images')
+        if not images:
+            return Response(
+                {'error': 'No images provided'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if this is a replacement upload
+        replace_existing = request.POST.get('replace_existing', '').lower() == 'true'
+
+        if replace_existing and call.images:
+            for old_image_url in call.images:
+                try:
+                    # Handle both absolute and relative URLs
+                    if old_image_url.startswith('http'):
+                        # Extract path from full URL
+                        from urllib.parse import urlparse
+                        parsed_url = urlparse(old_image_url)
+                        path = parsed_url.path
+                        # Remove /media/ prefix if present
+                        if path.startswith('/media/'):
+                            path = path[7:]  # Remove '/media/'
+                    else:
+                        # Relative path
+                        path = old_image_url.lstrip('/')
+                    
+                    if default_storage.exists(path):
+                        default_storage.delete(path)
+                        logger.info(f"Deleted old image file: {path}")
+                    else:
+                        logger.warning(f"Old image file not found in storage: {path}")
+                        
+                except Exception as e:
+                    logger.error(f"Error deleting old image file: {e}")
+                # Continue anyway to avoid breaking the upload process
+    
+
+        uploaded_urls = []
+        
+        for image in images:
+            try:
+                # Validate image file
+                if not image.content_type.startswith('image/'):
+                    continue
+                    
+                # Generate unique filename
+                ext = os.path.splitext(image.name)[1]
+                filename = f"service_call_{call.id}_{uuid.uuid4().hex}{ext}"
+                
+                # Save file
+                path = default_storage.save(f"service_calls/{filename}", ContentFile(image.read()))
+                url = request.build_absolute_uri(default_storage.url(path))
+                
+                uploaded_urls.append(url)
+                
+            except Exception as e:
+                logger.error(f"Error uploading image {image.name}: {e}")
+                continue
+        
+        if not uploaded_urls:
+            return Response(
+                {'error': 'No valid images could be uploaded'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Update call with new images (append to existing)
+        if replace_existing:
+            # Replace all existing images with new ones
+            call.images = uploaded_urls
+            logger.info(f"Replaced images for call {call.id}: {len(uploaded_urls)} new images")
+        else:
+            # Append to existing images (original behavior)
+            current_images = call.images or []
+            call.images = current_images + uploaded_urls
+            logger.info(f"Added images to call {call.id}: {len(uploaded_urls)} new images, {len(current_images)} existing")
+        call.save()
+        
+        return Response({'images': call.images}, status=status.HTTP_200_OK)
+    
+    @action(detail=True, methods=['delete'])
+    def remove_image(self, request, pk=None):
+        """Remove an image from a service call"""
+        call = self.get_object()
+        image_url = request.data.get('image_url')
+        if not image_url:
+            return Response(
+                {'error': 'Image URL is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check permissions
+        if not self.has_edit_permission(call, request.user):
+            return Response(
+                {'error': 'You do not have permission to remove images from this call'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if image_url not in (call.images or []):
+            return Response(
+                {'error': 'Image not found in this service call'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Remove image from storage
+        try:
+            # Handle both absolute and relative URLs
+            if image_url.startswith('http'):
+                # Extract path from full URL
+                from urllib.parse import urlparse
+                parsed_url = urlparse(image_url)
+                path = parsed_url.path
+                # Remove /media/ prefix if present
+                if path.startswith('/media/'):
+                    path = path[7:]  # Remove '/media/'
+            else:
+                # Relative path
+                path = image_url.lstrip('/')
+            
+            if default_storage.exists(path):
+                default_storage.delete(path)
+                logger.info(f"Deleted image file: {path}")
+            else:
+                logger.warning(f"Image file not found in storage: {path}")
+                
+        except Exception as e:
+            logger.error(f"Error deleting image file: {e}")
+            # Continue anyway to remove from database
+        
+        # Remove image URL from call
+        updated_images = [img for img in (call.images or []) if img != image_url]
+        call.images = updated_images
+        call.save()
+        
+        return Response({'images': call.images}, status=status.HTTP_200_OK)
+    
+    def has_edit_permission(self, call, user):
+        """Check if user has permission to edit this call"""
+        # Director and Super Admin can always edit
+        if user.role in ['Director', 'Super Admin']:
+            return True
+        
+        # Check if user is an assigned technician
+        is_assigned_technician = call.technician.filter(id=user.id).exists()
+        
+        # Technician Managers can edit any call
+        if user.role == 'Technician Manager':
+            return True
+        
+        # Technicians can only edit if assigned
+        if user.role == 'Technician' and is_assigned_technician:
+            return True
+        
+        return False
+    
+    def update(self, request, *args, **kwargs):
+        """Override update to prevent closing without images"""
+        instance = self.get_object()
+        new_status = request.data.get('status')
+        
+        # Check if trying to close without images
+        if (new_status == 'Closed' and 
+            (not instance.images or len(instance.images) == 0) and
+            not request.data.get('force_close', False)):
+            return Response(
+                {'error': 'Cannot close service call without at least one image'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        return super().update(request, *args, **kwargs)
     
 @method_decorator(csrf_exempt, name='dispatch')
 class CallValidateTokenView(APIView):

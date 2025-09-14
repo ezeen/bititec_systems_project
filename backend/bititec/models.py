@@ -34,6 +34,46 @@ class CustomUserManager(BaseUserManager):
 
         return self.create_user(email, password, **extra_fields)
 
+class Store(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    store_name = models.CharField(max_length=255)
+    store_location = models.CharField(max_length=255)
+    store_size = models.IntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.store_name} - {self.store_location}"
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'storeName': self.store_name,
+            'storeLocation': self.store_location,
+            'storeSize': self.store_size,
+            'createdAt': self.created_at.isoformat(),
+            'updatedAt': self.updated_at.isoformat()
+        }
+
+    def copy_with(self, **kwargs):
+        return Store.objects.create(
+            store_name=kwargs.get('store_name', self.store_name),
+            store_location=kwargs.get('store_location', self.store_location),
+            store_size=kwargs.get('store_size', self.store_size)
+        )
+    
+    @property
+    def machines_count(self):
+        return self.machines.count()
+
+    @property
+    def parts_count(self):
+        return self.parts.count()
+
+    @property
+    def accessories_count(self):
+        return self.accessories.count()
+
 class CustomUser(AbstractUser):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     ROLE_CHOICES = (
@@ -52,6 +92,10 @@ class CustomUser(AbstractUser):
         ('calls', 'Calls'),
         ('leases', 'Leases'),
         ('clients', 'Clients'),
+        ('inquiries', 'Inquiries'),
+        ('purchase_orders', 'Purchase Orders'),
+        ('quotation', 'Quotation'),
+        ('transfers', 'Transfers'),
     )
     
     username = None
@@ -62,6 +106,12 @@ class CustomUser(AbstractUser):
     role = models.CharField(_('role'), max_length=20, choices=ROLE_CHOICES, default='Technician')
     active = models.BooleanField(_('active'), default=False)
     profile_image = models.ImageField(upload_to='profile_images/', null=True, blank=True)
+    stores = models.ManyToManyField(
+        Store, 
+        related_name='users',
+        blank=True,
+        help_text="Stores this user has access to"
+    )
 
     # Security fields
     failed_login_attempts = models.IntegerField(default=0)
@@ -94,19 +144,21 @@ class CustomUser(AbstractUser):
     def __str__(self):
         return self.email
     
-    def has_key_access(self, key, action=None):
-        """Check if user has access to a specific key and action"""
-        if not self.keys:  # This will handle both None and empty dict
-            return False
-        
-        key_permissions = self.keys.get(key, [])
-        if not key_permissions:
-            return False
+    def has_permission(self, key, action, obj=None):
+        """Check if user has permission for a specific key and action with store validation"""
+        # First check role-based permissions
+        role_permissions = self.get_role_permissions()
+        if key in role_permissions and action in role_permissions[key]:
+            # For role-based permissions, check store access if object has store
+            if obj and hasattr(obj, 'store'):
+                return self.check_store_access(obj.store)
+            return True
             
-        if action is None:
-            return True  # Has key access
-            
-        return action in key_permissions
+        # Then check key-based permissions
+        if self.has_key_access(key, action, obj):
+            return True
+                
+        return False
     
     def get_role_permissions(self):
         """Get base permissions based on role"""
@@ -120,6 +172,7 @@ class CustomUser(AbstractUser):
                 'inquiries': ['read', 'create', 'update', 'delete'],
                 'purchase_orders': ['read', 'create', 'update', 'delete', 'verify'],
                 'quotation': ['read', 'create', 'update', 'delete'],
+                'transfers': ['read', 'create', 'update', 'delete'],
             },
             'Super Admin': {
                 'sales': ['read', 'create', 'update', 'delete'],
@@ -130,6 +183,7 @@ class CustomUser(AbstractUser):
                 'inquiries': ['read', 'create', 'update', 'delete'],
                 'purchase_orders': ['read', 'create', 'update', 'delete', 'verify'],
                 'quotation': ['read', 'create', 'update', 'delete'],
+                'transfers': ['read', 'create', 'update', 'delete'],
             },
             'Sales Manager': {
                 'sales': ['read', 'create', 'update', 'delete'],
@@ -145,6 +199,7 @@ class CustomUser(AbstractUser):
             'Inventory Manager': {
                 'inventory': ['read', 'create', 'update', 'delete'],
                 'inquiries': ['read', 'create', 'update', 'delete'],
+                'transfers': ['read', 'create', 'update', 'delete'],
             },
             'Technician Manager': {
                 'calls': ['read', 'create', 'update', 'delete']
@@ -155,7 +210,7 @@ class CustomUser(AbstractUser):
         }
         return role_permission_map.get(self.role, {})
     
-    def has_permission(self, key, action):
+    def has_permission(self, key, action, obj=None):
         """Check if user has permission for a specific key and action"""
         # First check role-based permissions
         role_permissions = self.get_role_permissions()
@@ -163,7 +218,19 @@ class CustomUser(AbstractUser):
             return True
             
         # Then check key-based permissions
-        return self.has_key_access(key, action)
+        if self.has_key_access(key, action):
+            # Check store access if object has store relationship
+            if obj and hasattr(obj, 'store'):
+                return self.check_store_access(obj.store)
+            return True
+            
+        return False
+
+    def check_store_access(self, store):
+        """Check if user has access to a specific store"""
+        if self.role in ['Director', 'Super Admin']:
+            return True
+        return store in self.stores.all()
     
     def get_all_permissions(self):
         """Get combined role and key permissions"""
@@ -181,23 +248,63 @@ class CustomUser(AbstractUser):
                 
             # Add key permissions
             if key in key_perms:
-                combined_actions.update(key_perms[key])
+                key_data = key_perms[key]
+                if isinstance(key_data, list):
+                    combined_actions.update(key_data)
+                elif isinstance(key_data, dict):
+                    combined_actions.update(key_data.get('actions', []))
                 
             if combined_actions:
                 all_perms[key] = list(combined_actions)
                 
         return all_perms
     
-    def grant_key_access(self, key, actions, granted_by_user, reason=""):
-        """Grant key access with specific actions"""
+    def has_key_access(self, key, action=None, obj=None):
+        """Check if user has key-based access"""
         if not self.keys:
+            return False
+        
+        key_data = self.keys.get(key)
+        if not key_data:
+            return False
+        
+        # Handle both old format (list) and new format (dict)
+        if isinstance(key_data, list):
+            actions = key_data
+        elif isinstance(key_data, dict):
+            actions = key_data.get('actions', [])
+        else:
+            return False
+        
+        # Check action permission
+        if action and action not in actions:
+            return False
+        
+        # Check store access if object has store
+        if obj and hasattr(obj, 'store'):
+            if isinstance(key_data, dict):
+                allowed_store_ids = key_data.get('store_ids', [])
+                if allowed_store_ids and str(obj.store.id) not in allowed_store_ids:
+                    return False
+        
+        return True
+    
+    def grant_key_access(self, key, actions, granted_by_user, reason="", store_ids=None):
+        """Grant key access with specific actions"""
+        if self.keys is None:
             self.keys = {}
         
         # Validate actions
         valid_actions = ['read', 'create', 'update', 'delete']
         actions = [a for a in actions if a in valid_actions]
         
-        self.keys[key] = actions
+        self.keys[key] = {
+            'actions': actions,
+            'store_ids': store_ids or [],
+            'granted_by': str(granted_by_user.id),
+            'granted_at': timezone.now().isoformat(),
+            'reason': reason
+        }
         self.keys_granted_by = granted_by_user
         self.keys_granted_at = timezone.now()
         self.keys_reason = reason
@@ -212,12 +319,17 @@ class CustomUser(AbstractUser):
                 'key': key,
                 'actions': actions,
                 'granted_by': str(granted_by_user.id),
-                'reason': reason
+                'reason': reason,
+                'store_ids': store_ids or []
+
             }
         )
 
     def revoke_key_access(self, key, revoked_by_user):
         """Revoke key access"""
+        if self.keys is None:
+            self.keys = {}
+
         if self.keys and key in self.keys:
             del self.keys[key]
             # If keys becomes empty, you can either keep it as {} or set to None
@@ -331,46 +443,6 @@ class SecurityEvent(models.Model):
     
     class Meta:
         ordering = ['-timestamp']
-
-class Store(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    store_name = models.CharField(max_length=255)
-    store_location = models.CharField(max_length=255)
-    store_size = models.IntegerField()
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return f"{self.store_name} - {self.store_location}"
-
-    def to_dict(self):
-        return {
-            'id': str(self.id),
-            'storeName': self.store_name,
-            'storeLocation': self.store_location,
-            'storeSize': self.store_size,
-            'createdAt': self.created_at.isoformat(),
-            'updatedAt': self.updated_at.isoformat()
-        }
-
-    def copy_with(self, **kwargs):
-        return Store.objects.create(
-            store_name=kwargs.get('store_name', self.store_name),
-            store_location=kwargs.get('store_location', self.store_location),
-            store_size=kwargs.get('store_size', self.store_size)
-        )
-    
-    @property
-    def machines_count(self):
-        return self.machines.count()
-
-    @property
-    def parts_count(self):
-        return self.parts.count()
-
-    @property
-    def accessories_count(self):
-        return self.accessories.count()
 
 class MachineType(models.Model):
     name = models.CharField(max_length=255)
@@ -858,6 +930,11 @@ class Call(models.Model):
     walk_in_serial_no = models.CharField(max_length=255, blank=True)
     start_time = models.DateTimeField(null=True, blank=True)  
     finish_time = models.DateTimeField(null=True, blank=True)
+    images = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of image URLs for this service call"
+    )
 
     def __str__(self):
         if self.client:

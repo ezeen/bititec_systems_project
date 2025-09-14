@@ -44,6 +44,8 @@ urlpatterns = [
     path('service-calls/<uuid:pk>/update_approval/', views.CallViewSet.as_view({'patch': 'update_approval'})),
     path('service-calls/<uuid:pk>/start_service/', views.CallViewSet.as_view({'post': 'start_service'})),
     path('service-calls/<uuid:pk>/complete_service/', views.CallViewSet.as_view({'post': 'complete_service'})),
+    path('service-calls/<uuid:pk>/upload-images/', views.CallViewSet.as_view({'post': 'upload_images'})),
+    path('service-calls/<uuid:pk>/remove-image/', views.CallViewSet.as_view({'delete': 'remove_image'})),
     path('leases/', views.LeaseContractViewSet.as_view({'get': 'list', 'post': 'create'})),
     path('leases/<uuid:pk>/', views.LeaseContractViewSet.as_view({'get': 'retrieve', 'put': 'update', 'patch': 'update', 'delete': 'destroy'})),
     path('leases/<uuid:pk>/assign-account-handler/', views.LeaseContractViewSet.as_view({'patch': 'assign_account_handler'})),

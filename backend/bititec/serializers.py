@@ -7,6 +7,40 @@ from dateutil.relativedelta import relativedelta
 from django.utils import timezone
 from django.db import transaction
 
+class StoreSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(read_only=True)
+    storeName = serializers.CharField(source='store_name')
+    storeLocation = serializers.CharField(source='store_location')
+    storeSize = serializers.IntegerField(source='store_size')
+    machines_count = serializers.SerializerMethodField()
+    partsCount = serializers.IntegerField(source='parts_count', read_only=True)
+    accessoriesCount = serializers.IntegerField(source='accessories_count', read_only=True)
+
+    class Meta:
+        model = Store
+        fields = [
+            'id', 'storeName', 'storeLocation', 'storeSize',
+            'machines_count', 'partsCount', 'accessoriesCount'
+        ]
+        extra_kwargs = {
+            'store_name': {'write_only': True},
+            'store_location': {'write_only': True},
+            'store_size': {'write_only': True}
+        }
+
+    def create(self, validated_data):
+        return Store.objects.create(**validated_data)
+
+    def update(self, instance, validated_data):
+        instance.store_name = validated_data.get('store_name', instance.store_name)
+        instance.store_location = validated_data.get('store_location', instance.store_location)
+        instance.store_size = validated_data.get('store_size', instance.store_size)
+        instance.save()
+        return instance
+    
+    def get_machines_count(self, obj):
+        return obj.machines.count()
+
 class UserSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(read_only=True)
     profile_image = serializers.ImageField(read_only=True)
@@ -15,6 +49,14 @@ class UserSerializer(serializers.ModelSerializer):
         allow_null=True,
         allow_blank=True,
         max_length=20
+    )
+    stores = StoreSerializer(many=True, read_only=True)
+    store_ids = serializers.PrimaryKeyRelatedField(
+        queryset=Store.objects.all(),
+        source='stores',
+        many=True,
+        write_only=True,
+        required=False
     )
     is_locked = serializers.SerializerMethodField()
     failed_login_attempts = serializers.IntegerField(read_only=True)
@@ -73,11 +115,18 @@ class UserSerializer(serializers.ModelSerializer):
             'id', 'email', 'firstname', 'lastname',
             'phonenumber', 'role', 'active', 'profile_image', 'is_locked',
             'failed_login_attempts', 'locked_until', 'last_failed_login',
-            'keys', 'all_permissions'
+            'keys', 'all_permissions', 'stores', 'store_ids'
         ]
         extra_kwargs = {'password': {'write_only': True}, 'role': {'read_only': True}}
         
 class RegisterSerializer(serializers.ModelSerializer):
+    store_ids = serializers.PrimaryKeyRelatedField(
+        queryset=Store.objects.all(),
+        source='stores',
+        many=True,
+        write_only=True,
+        required=False
+    )
     phonenumber = serializers.CharField(
         required=False, 
         allow_blank=True,
@@ -85,7 +134,7 @@ class RegisterSerializer(serializers.ModelSerializer):
     )
     class Meta:
         model = CustomUser
-        fields = ['email', 'password', 'firstname', 'lastname', 'phonenumber', 'role']
+        fields = ['email', 'password', 'firstname', 'lastname', 'phonenumber', 'role', 'store_ids']
         extra_kwargs = {'password': {'write_only': True}}
 
     def validate_phonenumber(self, value):
@@ -104,8 +153,14 @@ class RegisterSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
+        stores = validated_data.pop('stores', [])
+
         validated_data['active'] = validated_data['role'] in ['Director', 'Super Admin']
         user = CustomUser.objects.create_user(**validated_data)
+
+        if stores:
+            user.stores.set(stores)
+
         return user
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -151,40 +206,6 @@ class EnhancedUserSerializer(serializers.ModelSerializer):
             'locked_until', 'last_failed_login', 'keys', 
             'all_permissions', 'key_audit'
         ]
-
-class StoreSerializer(serializers.ModelSerializer):
-    id = serializers.UUIDField(read_only=True)
-    storeName = serializers.CharField(source='store_name')
-    storeLocation = serializers.CharField(source='store_location')
-    storeSize = serializers.IntegerField(source='store_size')
-    machines_count = serializers.SerializerMethodField()
-    partsCount = serializers.IntegerField(source='parts_count', read_only=True)
-    accessoriesCount = serializers.IntegerField(source='accessories_count', read_only=True)
-
-    class Meta:
-        model = Store
-        fields = [
-            'id', 'storeName', 'storeLocation', 'storeSize',
-            'machines_count', 'partsCount', 'accessoriesCount'
-        ]
-        extra_kwargs = {
-            'store_name': {'write_only': True},
-            'store_location': {'write_only': True},
-            'store_size': {'write_only': True}
-        }
-
-    def create(self, validated_data):
-        return Store.objects.create(**validated_data)
-
-    def update(self, instance, validated_data):
-        instance.store_name = validated_data.get('store_name', instance.store_name)
-        instance.store_location = validated_data.get('store_location', instance.store_location)
-        instance.store_size = validated_data.get('store_size', instance.store_size)
-        instance.save()
-        return instance
-    
-    def get_machines_count(self, obj):
-        return obj.machines.count()
     
 class BaseTypeSerializer(serializers.ModelSerializer):
     image1_url = serializers.SerializerMethodField()
@@ -755,6 +776,12 @@ class CallSerializer(serializers.ModelSerializer):
     parts_used = serializers.CharField(required=False, allow_blank=True)
     start_time = serializers.DateTimeField(format="%Y-%m-%d %H:%M", required=False, allow_null=True)
     finish_time = serializers.DateTimeField(format="%Y-%m-%d %H:%M", required=False, allow_null=True)
+    image_urls = serializers.SerializerMethodField(read_only=True)
+    images = serializers.ListField(
+        child=serializers.URLField(),
+        required=False,
+        allow_empty=True,
+    )
     
     class Meta:
         model = Call
@@ -768,13 +795,16 @@ class CallSerializer(serializers.ModelSerializer):
             'comments', 'status', 'department', 'is_checked', 'director_comment', 'ticket_no',
             'spare_description', 'created_at', 'walk_in_machine',
             'walk_in_machine_name', 'walk_in_machine_type', 'walk_in_serial_no', 'technician_manager_approval', 'client_verification',
-            'finish_time', 'start_time', 'lpo'
+            'finish_time', 'start_time', 'lpo', 'images', 'image_urls',
         ]
         extra_kwargs = {
             'created_at': {'read_only': True},
             'ticket_no': {'read_only': True},
         }
-    
+
+    def get_image_urls(self, obj):
+        return obj.images
+
     def create(self, validated_data):
         # Handle walk-in machine data
         walk_in_machine = validated_data.pop('walk_in_machine', None)
@@ -848,6 +878,8 @@ class CallSerializer(serializers.ModelSerializer):
     
     def to_representation(self, instance):
         data = super().to_representation(instance)
+
+        data['images'] = instance.images if instance.images else []
         
         # For walk-in calls, use the stored walk-in data if client is None
         if instance.contract_type == 'WalkIn' and not instance.client:
@@ -926,6 +958,10 @@ class CallSerializer(serializers.ModelSerializer):
         if obj.item and obj.item.store:
             return obj.item.store.store_name
         return ""
+    
+    def get_image_urls(self, obj):
+        """Return the images list"""
+        return obj.images if obj.images else []
     
 class StorePartInquirySerializer(serializers.ModelSerializer):
     requested_by = UserSerializer(read_only=True)
