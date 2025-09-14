@@ -523,7 +523,7 @@ def grant_key_access(request):
         )
     
     # Validate key
-    valid_keys = ['inventory', 'sales', 'calls', 'leases', 'clients', 'inquiries']
+    valid_keys = ['inventory', 'sales', 'calls', 'leases', 'clients', 'inquiries', 'purchase_orders', 'quotation', 'transfers']
     if key not in valid_keys:
         return Response(
             {'error': f'Invalid key. Must be one of: {valid_keys}'}, 
