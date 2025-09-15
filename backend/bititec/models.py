@@ -188,6 +188,7 @@ class CustomUser(AbstractUser):
             'Sales Manager': {
                 'sales': ['read', 'create', 'update', 'delete'],
                 'clients': ['read', 'create', 'update', 'delete'],
+                'leases': ['read', 'create', 'update', 'delete'],
                 'purchase_orders': ['read', 'create', 'update', 'verify'],
                 'quotation': ['read', 'create', 'update'],
             },
