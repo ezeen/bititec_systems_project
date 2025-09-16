@@ -48,6 +48,8 @@ urlpatterns = [
     path('service-calls/<uuid:pk>/remove-image/', views.CallViewSet.as_view({'delete': 'remove_image'})),
     path('leases/', views.LeaseContractViewSet.as_view({'get': 'list', 'post': 'create'})),
     path('leases/<uuid:pk>/', views.LeaseContractViewSet.as_view({'get': 'retrieve', 'put': 'update', 'patch': 'update', 'delete': 'destroy'})),
+    path('leases/<uuid:pk>/terminate_lease/', views.LeaseContractViewSet.as_view({'patch': 'terminate_lease'})),
+    path('leases/<uuid:pk>/reinstate_lease/', views.LeaseContractViewSet.as_view({'patch': 'reinstate_lease'})),
     path('leases/<uuid:pk>/assign-account-handler/', views.LeaseContractViewSet.as_view({'patch': 'assign_account_handler'})),
     path('leases/assign-technician/', views.LeaseAssignTechnician.as_view(), name='assign-technician'),
     # path('leases/my-handled-leases/', views.LeaseContractViewSet.as_view({'get': 'my_handled_leases'})),

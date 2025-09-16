@@ -1918,6 +1918,85 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
             # Delete lease
             instance.delete()
 
+    @action(detail=True, methods=['patch'])
+    def terminate_lease(self, request, pk=None):
+        """Atomically terminate a lease and update machine status"""
+        lease = self.get_object()
+        
+        if not lease.is_active:
+            return Response(
+                {'error': 'Lease is already terminated'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            with transaction.atomic():
+                # Update lease status
+                lease.is_active = False
+                lease.save()
+                
+                # Update machine status
+                if lease.item:
+                    machine = lease.item
+                    machine.machine_status = 'Available'
+                    machine.save()
+                
+                # Return updated lease data
+                serializer = self.get_serializer(lease)
+                return Response({
+                    'message': 'Lease terminated successfully',
+                    'lease': serializer.data
+                })
+                
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to terminate lease: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['patch'])
+    def reinstate_lease(self, request, pk=None):
+        """Atomically reinstate a lease and update machine status"""
+        lease = self.get_object()
+        
+        if lease.is_active:
+            return Response(
+                {'error': 'Lease is already active'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if machine is still available for reinstatement
+        if lease.item and lease.item.machine_status == 'Leased':
+            return Response(
+                {'error': 'Machine is currently leased to another client'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            with transaction.atomic():
+                # Update lease status
+                lease.is_active = True
+                lease.save()
+                
+                # Update machine status
+                if lease.item:
+                    machine = lease.item
+                    machine.machine_status = 'Leased'
+                    machine.save()
+                
+                # Return updated lease data
+                serializer = self.get_serializer(lease)
+                return Response({
+                    'message': 'Lease reinstated successfully',
+                    'lease': serializer.data
+                })
+                
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to reinstate lease: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 class LeaseAssignAccountHandler(APIView):
     """Bulk assign account handler to multiple leases"""
     permission_classes = [IsAuthenticated]

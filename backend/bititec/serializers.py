@@ -429,7 +429,8 @@ class LeaseContractSerializer(serializers.ModelSerializer):
                 original_machine.machine_status = 'Available'
                 original_machine.save()
                 
-                # Assign new machine
+            # Only assign new machine if lease is still active
+            if new_active:
                 new_machine.machine_status = 'Leased'
                 new_machine.save()
             
