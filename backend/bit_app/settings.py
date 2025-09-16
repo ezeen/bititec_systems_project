@@ -51,19 +51,50 @@ INSTALLED_APPS = [
     'django_filters',
 ]
 
+# In your settings.py, replace the CHANNEL_LAYERS configuration with this:
+
 CHANNEL_LAYERS = {
     'default': {
-        'BACKEND': 'channels_redis.core.InMemoryChannelLayer',
+        'BACKEND': 'channels.layers.InMemoryChannelLayer',
+    },
+}
+
+# Alternative: If you want to use Redis (for production), use this instead:
+# First install channels-redis: pip install channels-redis
+# Make sure Redis server is running on your system
+# Then use this configuration:
+
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
         'CONFIG': {
-            'hosts': [('127.0.0.1', 6379)],
-            "symmetric_encryption_keys": [SECRET_KEY],
+            "hosts": [('127.0.0.1', 6379)],
         },
     },
 }
 
+if DEBUG:
+    # Use in-memory for development
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels.layers.InMemoryChannelLayer',
+        },
+    }
+else:
+    # Use Redis for production
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {
+                "hosts": [('127.0.0.1', 6379)],
+            },
+        },
+    }
+
 MIDDLEWARE = [
     'csp.middleware.CSPMiddleware',
     'corsheaders.middleware.CorsMiddleware',
+    'bititec.middleware.MobileUploadMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -195,6 +226,9 @@ CORS_ALLOW_HEADERS = [
     'x-client-version',
     'x-client-platform',
     'x-session-token',
+    'x-upload-context',
+    'cache-control',  # Important for mobile
+    'pragma',
 ]
 
 CORS_EXPOSE_HEADERS = [
@@ -250,6 +284,47 @@ CSRF_COOKIE_SECURE = os.getenv('CSRF_COOKIE_SECURE', 'True').lower() == 'true'
 SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000'))
 SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv('SECURE_HSTS_INCLUDE_SUBDOMAINS', 'True').lower() == 'true'
 SECURE_HSTS_PRELOAD = os.getenv('SECURE_HSTS_PRELOAD', 'True').lower() == 'true'
+
+FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024  
+DATA_UPLOAD_MAX_MEMORY_SIZE = 8 * 1024 * 1024   
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 1000   
+FILE_UPLOAD_PERMISSIONS = 0o644     
+
+FILE_UPLOAD_HANDLERS = [
+    'django.core.files.uploadhandler.MemoryFileUploadHandler',
+    'django.core.files.uploadhandler.TemporaryFileUploadHandler',
+]
+
+# Temporary file upload directory
+FILE_UPLOAD_TEMP_DIR = os.path.join(BASE_DIR, 'temp_uploads')
+
+# Security settings that might interfere with uploads
+SECURE_CONTENT_TYPE_NOSNIFF = True  # Allow content type detection
+SECURE_BROWSER_XSS_FILTER = True
+X_FRAME_OPTIONS = 'SAMEORIGIN'
+
+CSP_DEFAULT_SRC = ["'self'"]
+CSP_IMG_SRC = ["'self'", "data:", "blob:", "https:"]  # Allow data URLs for image previews
+CSP_CONNECT_SRC = ["'self'"]
+CSP_FORM_ACTION = ["'self'"]
+
+CONN_MAX_AGE = 60
+
+if DEBUG:
+    # More permissive settings for development
+    SECURE_SSL_REDIRECT = False
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
+    SECURE_HSTS_SECONDS = 0
+    
+    # Create temp upload directory if it doesn't exist
+    os.makedirs(FILE_UPLOAD_TEMP_DIR, exist_ok=True)
+else:
+    # Your production settings remain the same
+    SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'True').lower() == 'true'
+    SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', 'True').lower() == 'true'
+    CSRF_COOKIE_SECURE = os.getenv('CSRF_COOKIE_SECURE', 'True').lower() == 'true'
+    SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000'))
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')

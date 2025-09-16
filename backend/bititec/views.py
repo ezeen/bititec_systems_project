@@ -41,6 +41,7 @@ from django.template.loader import render_to_string
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 from xhtml2pdf import pisa
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -1418,6 +1419,64 @@ class CallViewSet(viewsets.ModelViewSet):
         response_data['previous_status'] = old_status
         
         return Response(response_data)
+    
+    def is_mobile_request(request):
+        """Detect if request is from mobile device"""
+        user_agent = request.META.get('HTTP_USER_AGENT', '').lower()
+        mobile_indicators = ['mobile', 'android', 'iphone', 'ipad', 'ipod', 'blackberry', 'windows phone']
+        is_mobile_ua = any(indicator in user_agent for indicator in mobile_indicators)
+        
+        # Also check custom header
+        platform = request.META.get('HTTP_X_CLIENT_PLATFORM', '').lower()
+        is_mobile_header = platform == 'mobile'
+        
+        return is_mobile_ua or is_mobile_header
+    
+    def validate_image_file(uploaded_file, is_mobile=False):
+        """Validate uploaded image file with mobile-specific rules"""
+        errors = []
+        
+        # File size limits
+        max_size = 5 * 1024 * 1024 if is_mobile else 10 * 1024 * 1024  # 5MB mobile, 10MB desktop
+        if uploaded_file.size > max_size:
+            size_mb = max_size // (1024 * 1024)
+            errors.append(f'File too large. Maximum size: {size_mb}MB for {"mobile" if is_mobile else "desktop"}')
+            return errors  # Return early for oversized files
+        
+        # Content type validation
+        allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
+        content_type = uploaded_file.content_type
+        
+        if content_type not in allowed_types:
+            errors.append(f'Invalid file type: {content_type}. Allowed: JPEG, PNG, GIF, WebP')
+            return errors
+        
+        # Try to open and validate the image
+        try:
+            uploaded_file.seek(0)  # Reset file pointer
+            with Image.open(uploaded_file) as img:
+                # Verify it's actually an image
+                img.verify()
+                
+                # Check dimensions (prevent extremely large images)
+                uploaded_file.seek(0)  # Reset again
+                with Image.open(uploaded_file) as img:
+                    width, height = img.size
+                    max_dimension = 4096  # 4K max
+                    if width > max_dimension or height > max_dimension:
+                        errors.append(f'Image dimensions too large: {width}x{height}. Maximum: {max_dimension}x{max_dimension}')
+                    
+                    # Mobile-specific dimension warnings
+                    if is_mobile and (width > 3000 or height > 3000):
+                        logger.warning(f'Large image from mobile: {width}x{height}')
+        
+        except Exception as e:
+            errors.append(f'Invalid or corrupted image file: {str(e)}')
+        
+        finally:
+            uploaded_file.seek(0)  # Reset file pointer for actual use
+        
+        return errors
     
     @action(detail=True, methods=['post'])
     def upload_images(self, request, pk=None):

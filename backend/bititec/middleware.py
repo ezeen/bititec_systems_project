@@ -239,3 +239,42 @@ class SecurityUtils:
         """Reset failed attempts counter"""
         cache_key = f"{attempt_type}_attempts_{identifier}"
         cache.delete(cache_key)
+
+class MobileUploadMiddleware:
+    """Middleware to optimize requests for mobile uploads"""
+    
+    def __init__(self, get_response):
+        self.get_response = get_response
+    
+    def __call__(self, request):
+        # Pre-process mobile upload requests
+        if self.is_upload_request(request) and self.is_mobile_request(request):
+            # Increase timeout for mobile uploads
+            request.META['HTTP_X_UPLOAD_TIMEOUT'] = '120'  # 2 minutes
+            
+            # Set mobile-friendly content length limit
+            request.META['CONTENT_LENGTH_LIMIT'] = str(8 * 1024 * 1024)  # 8MB
+        
+        response = self.get_response(request)
+        
+        # Post-process mobile responses
+        if self.is_mobile_request(request):
+            # Add mobile-friendly headers
+            response['X-Mobile-Optimized'] = 'true'
+            response['Cache-Control'] = 'no-cache, no-store'  # Prevent caching issues on mobile
+        
+        return response
+    
+    def is_upload_request(self, request):
+        """Check if this is an upload request"""
+        return (
+            request.method == 'POST' and
+            request.content_type and
+            request.content_type.startswith('multipart/form-data')
+        )
+    
+    def is_mobile_request(self, request):
+        """Detect mobile requests"""
+        user_agent = request.META.get('HTTP_USER_AGENT', '').lower()
+        mobile_indicators = ['mobile', 'android', 'iphone', 'ipad']
+        return any(indicator in user_agent for indicator in mobile_indicators)
