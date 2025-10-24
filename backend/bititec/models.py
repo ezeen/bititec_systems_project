@@ -10,6 +10,8 @@ import uuid
 from django.utils import timezone
 from django.db.models import Sum
 from django.conf import settings
+from datetime import date
+from dateutil.relativedelta import relativedelta
 
 class CustomUserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
@@ -882,6 +884,100 @@ class ClientMachine(models.Model):
     description = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+class LeaseServiceSchedule(models.Model):
+    FREQUENCY_CHOICES = [
+        ('monthly', 'Monthly'),
+        ('quarterly', 'Quarterly'),
+        ('semi-annual', 'Semi-Annual'),
+        ('annual', 'Annual'),
+        ('custom', 'Custom'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lease = models.ForeignKey('LeaseContract', on_delete=models.CASCADE, related_name='service_schedules')
+    service_type = models.CharField(max_length=50, choices=[  # Remove Call.SERVICE_TYPE_CHOICES reference
+        ('Network Support', 'Network Support'),
+        ('Hardware & Software Support', 'Hardware & Software Support'),
+        ('Installation', 'Installation'),
+        ('Scheduled Maintenance', 'Scheduled Maintenance'),
+    ])
+    frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES)
+    frequency_months = models.PositiveIntegerField(default=1)
+    start_date = models.DateField()
+    end_date = models.DateField()
+    default_technicians = models.ManyToManyField(CustomUser, related_name='assigned_schedules', blank=True)
+    lpo = models.CharField(max_length=255, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def __str__(self):
+        return f"{self.lease.lease_no} - {self.service_type} - {self.frequency}"
+    
+    def generate_next_service_calls(self):
+        """Generate service calls for the upcoming period"""
+        from datetime import date
+        from dateutil.relativedelta import relativedelta
+        
+        today = date.today()
+        if today > self.end_date or not self.is_active:
+            return []
+        
+        # Find the last generated service call for this schedule
+        last_call = Call.objects.filter(  # Now Call is defined
+            lease_service_schedule=self
+        ).order_by('-reported_date').first()
+        
+        # Determine where to start generating from
+        if last_call:
+            start_from = last_call.reported_date.date() + relativedelta(months=self.frequency_months)
+        else:
+            start_from = self.start_date
+        
+        generated_calls = []
+        current_date = start_from
+        
+        # Generate calls until we reach today or the end date
+        while current_date <= self.end_date and current_date <= today:
+            # Check if call already exists for this period
+            existing_call = Call.objects.filter(  # Now Call is defined
+                lease_service_schedule=self,
+                reported_date__year=current_date.year,
+                reported_date__month=current_date.month
+            ).exists()
+            
+            if not existing_call:
+                # Create the service call
+                call = Call.objects.create(  # Now Call is defined
+                    contract_type='Lease',
+                    service_type=self.service_type,
+                    lease=self.lease,
+                    lease_service_schedule=self,
+                    client=self.lease.client,
+                    client_name=self.lease.client.client_name,
+                    client_location=self.lease.client.client_location,
+                    item=self.lease.item,
+                    department=self.lease.department,
+                    fault_reported=f"Scheduled {self.service_type} maintenance for {current_date.strftime('%B %Y')}",
+                    reported_by="System",
+                    reported_date=current_date,
+                    lpo=self.lpo,
+                    status='Open'
+                )
+                
+                # Assign default technicians
+                if self.default_technicians.exists():
+                    call.technician.set(self.default_technicians.all())
+                    call.status = 'Pending'
+                    call.save()
+                
+                generated_calls.append(call)
+            
+            # Move to next period
+            current_date += relativedelta(months=self.frequency_months)
+        
+        return generated_calls
+
 class Call(models.Model):
     STATUS_CHOICES = [
         ('Open', 'Open'),
@@ -931,10 +1027,25 @@ class Call(models.Model):
     walk_in_serial_no = models.CharField(max_length=255, blank=True)
     start_time = models.DateTimeField(null=True, blank=True)  
     finish_time = models.DateTimeField(null=True, blank=True)
+    lease = models.ForeignKey(
+        'LeaseContract', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='service_calls',
+        help_text="Associated lease contract if this is a lease service call"
+    )
     images = models.JSONField(
         default=list,
         blank=True,
         help_text="List of image URLs for this service call"
+    )
+    lease_service_schedule = models.ForeignKey(
+        LeaseServiceSchedule, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='generated_calls'
     )
 
     def __str__(self):
@@ -1092,6 +1203,26 @@ class LeaseContract(models.Model):
         now = timezone.now()
         random_num = random.randint(10000, 99999)
         return f"LN-{now.month:02d}/{now.strftime('%y')}/{random_num}"
+    
+class LeaseMachineSwap(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lease = models.ForeignKey(LeaseContract, on_delete=models.CASCADE, related_name='machine_swaps')
+    old_machine = models.ForeignKey(Machine, on_delete=models.PROTECT, related_name='swapped_from_leases')
+    new_machine = models.ForeignKey(Machine, on_delete=models.PROTECT, related_name='swapped_to_leases')
+    swap_reason = models.TextField()
+    swapped_at = models.DateTimeField(auto_now_add=True)
+    swapped_by = models.ForeignKey(
+        CustomUser, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        related_name='machine_swaps_performed'
+    )
+
+    def __str__(self):
+        return f"{self.lease.lease_no} - {self.old_machine.serial_no} → {self.new_machine.serial_no}"
+
+    class Meta:
+        ordering = ['-swapped_at']
 
 class SaleItem(models.Model):
     SALE_TYPE_CHOICES = [
@@ -1179,6 +1310,13 @@ class Sale(models.Model):
         ('Internal', 'Internal'),
         ('Local', 'Local'),
     ]
+    
+    PAYMENT_STATUS_CHOICES = [
+        ('Paid', 'Paid'),
+        ('Partial', 'Partial'),
+        ('Credit', 'Credit'),
+        ('Overdue', 'Overdue'),
+    ]
 
     sale_type = models.CharField(max_length=20, choices=SALE_TYPE_CHOICES, default='Internal')
     local_client_name = models.CharField(max_length=255, blank=True, null=True)
@@ -1191,10 +1329,18 @@ class Sale(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     add_vat = models.BooleanField(default=False)
-    vat_rate = models.DecimalField(max_digits=5, decimal_places=4, default=0.16)  # Store VAT rate
-    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)  # Sum of all item subtotals (VAT-exclusive)
-    vat_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)  # Total VAT amount
-    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)  # Final total
+    vat_rate = models.DecimalField(max_digits=5, decimal_places=4, default=0.16)
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    vat_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    
+    # Payment fields
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='Credit')
+    amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    remaining_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    due_date = models.DateField(null=True, blank=True)
+    payment_notes = models.TextField(blank=True)
+    
     store_part_inquiry = models.ForeignKey(StorePartInquiry, on_delete=models.SET_NULL, null=True, blank=True, related_name='sales')
     store_acc_inquiry = models.ForeignKey(StoreAccessoryInquiry, on_delete=models.SET_NULL, null=True, blank=True, related_name='sales')
 
@@ -1206,46 +1352,113 @@ class Sale(models.Model):
         
         # Calculate totals from all items
         for item in self.items.all():
-            # Item subtotal is always VAT-exclusive (unit_price * quantity)
             item_subtotal = item.unit_price * item.quantity
             
-            # Calculate VAT for this item if VAT is enabled
             if self.add_vat:
                 item_vat = item_subtotal * Decimal(str(self.vat_rate))
             else:
                 item_vat = Decimal('0')
             
-            # Calculate item total
             item_total = item_subtotal + item_vat
             
-            # Update item with calculated values
             item.subtotal = item_subtotal
             item.vat_amount = item_vat
             item.total_price = item_total
             
-            # Update the item in database with calculated values
             SaleItem.objects.filter(id=item.id).update(
                 subtotal=item_subtotal,
                 vat_amount=item_vat,
                 total_price=item_total
             )
             
-            # Add to sale totals
-            self.subtotal += item_subtotal  # VAT-exclusive subtotal
-            self.vat_total += item_vat      # Total VAT amount
+            self.subtotal += item_subtotal
+            self.vat_total += item_vat
         
-        # Final total including VAT
         self.total_amount = self.subtotal + self.vat_total
+        
+        # Update remaining balance
+        self.remaining_balance = self.total_amount - self.amount_paid
+        
+        # Update payment status based on amounts
+        self.update_payment_status()
+
+    def update_payment_status(self):
+        """Update payment status based on amount paid and due date"""
+        if self.amount_paid >= self.total_amount:
+            self.payment_status = 'Paid'
+            self.remaining_balance = Decimal('0')
+        elif self.amount_paid > 0:
+            self.payment_status = 'Partial'
+        else:
+            self.payment_status = 'Credit'
+        
+        # Check if overdue
+        if self.due_date and self.remaining_balance > 0 and timezone.now().date() > self.due_date:
+            self.payment_status = 'Overdue'
 
     def save(self, *args, **kwargs):
         if not self.sale_no:
             self.sale_no = self.generate_sale_number()
+        
+        # Calculate remaining balance before saving
+        if self.total_amount and self.amount_paid:
+            self.remaining_balance = self.total_amount - self.amount_paid
+        
         super().save(*args, **kwargs)
 
     def generate_sale_number(self):
         now = timezone.now()
         random_num = random.randint(10000, 99999)
         return f"SN-{now.month:02d}/{now.strftime('%y')}/{random_num}"
+
+    @property
+    def is_overdue(self):
+        """Check if payment is overdue"""
+        if self.due_date and self.remaining_balance > 0:
+            return timezone.now().date() > self.due_date
+        return False
+
+class Payment(models.Model):
+    """Track individual payments for a sale"""
+    PAYMENT_METHOD_CHOICES = [
+        ('Cash', 'Cash'),
+        ('Bank Transfer', 'Bank Transfer'),
+        ('Check', 'Check'),
+        ('Mobile Money', 'Mobile Money'),
+        ('Card', 'Card'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name='payments')
+    payment_date = models.DateField(default=timezone.now)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES, default='Cash')
+    reference_number = models.CharField(max_length=100, blank=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(CustomUser, on_delete=models.PROTECT, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-payment_date', '-created_at']
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        # Update sale's amount_paid and payment status
+        self.sale.amount_paid = self.sale.payments.aggregate(
+            total=models.Sum('amount')
+        )['total'] or Decimal('0')
+        self.sale.update_payment_status()
+        self.sale.save()
+
+    def delete(self, *args, **kwargs):
+        sale = self.sale
+        super().delete(*args, **kwargs)
+        # Recalculate sale's amount_paid after deletion
+        sale.amount_paid = sale.payments.aggregate(
+            total=models.Sum('amount')
+        )['total'] or Decimal('0')
+        sale.update_payment_status()
+        sale.save()
     
 class Delivery(models.Model):
     DELIVERY_TYPE_CHOICES = [
@@ -1457,13 +1670,13 @@ class MeterReading(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     lease = models.ForeignKey(LeaseContract, on_delete=models.CASCADE, related_name='meter_readings')
     machine = models.ForeignKey(Machine, on_delete=models.CASCADE)
-    month = models.DateField()  # Stores first day of the month
+    month = models.DateField()  
     meter_reading = models.PositiveIntegerField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = ('lease', 'month')  # Prevent duplicate entries
+        unique_together = ('lease', 'month') 
         ordering = ['-month']
 
     def __str__(self):

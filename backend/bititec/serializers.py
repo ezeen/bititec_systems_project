@@ -1,7 +1,7 @@
 from decimal import Decimal
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, MachineType, Machine, MeterReading, PartType, Part, PurchaseOrder, PurchaseOrderItem, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeaseMachineSwap, LeasePartInquiry, LeaseServiceSchedule, MachineType, Machine, MeterReading, PartType, Part, Payment, PurchaseOrder, PurchaseOrderItem, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem
 from django.db.models import Sum
 from dateutil.relativedelta import relativedelta
 from django.utils import timezone
@@ -345,6 +345,42 @@ class MeterReadingSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Meter reading for this month already exists")
         return data
     
+class LeaseMachineSwapSerializer(serializers.ModelSerializer):
+    old_machine_name = serializers.CharField(source='old_machine.machine_name', read_only=True)
+    old_machine_serial = serializers.CharField(source='old_machine.serial_no', read_only=True)
+    new_machine_name = serializers.CharField(source='new_machine.machine_name', read_only=True)
+    new_machine_serial = serializers.CharField(source='new_machine.serial_no', read_only=True)
+    swapped_by_name = serializers.CharField(source='swapped_by.get_full_name', read_only=True)
+    
+    lease = serializers.PrimaryKeyRelatedField(
+        queryset=LeaseContract.objects.all(),
+        write_only=True
+    )
+    old_machine = serializers.PrimaryKeyRelatedField(
+        queryset=Machine.objects.all(),
+        write_only=True
+    )
+    new_machine = serializers.PrimaryKeyRelatedField(
+        queryset=Machine.objects.all(),
+        write_only=True
+    )
+    
+    class Meta:
+        model = LeaseMachineSwap
+        fields = [
+            'id', 'lease', 'old_machine', 'new_machine', 'swap_reason', 
+            'swapped_at', 'swapped_by', 'old_machine_name', 'old_machine_serial',
+            'new_machine_name', 'new_machine_serial', 'swapped_by_name'
+        ]
+        extra_kwargs = {
+            'swapped_at': {'read_only': True},
+            'swapped_by': {'read_only': True},
+        }
+    
+    def create(self, validated_data):
+        validated_data['swapped_by'] = self.context['request'].user
+        return super().create(validated_data)
+    
 class LeaseContractSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source='client.client_name', read_only=True)
     client_location = serializers.CharField(source='client.client_location', read_only=True)
@@ -392,6 +428,7 @@ class LeaseContractSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True
     )
+    machine_swaps = LeaseMachineSwapSerializer(many=True, read_only=True)
     
     class Meta:
         model = LeaseContract
@@ -401,7 +438,8 @@ class LeaseContractSerializer(serializers.ModelSerializer):
             'serial_no', 'store', 'store_name', 'from_date', 'to_date', 'add_vat', 'add_myq',
             'billed_myq', 'is_active', 'contract_type', 'lease_no', 'created_at', 'client', 
             'meter_readings', 'missing_readings', 'technician', 'technician_id',
-            'account_handler', 'account_handler_id', 'account_handler_name', 'account_handler_email'
+            'account_handler', 'account_handler_id', 'account_handler_name', 'account_handler_email',
+            'machine_swaps'
         ]
         extra_kwargs = {
             'created_at': {'read_only': True},
@@ -462,6 +500,30 @@ class LeaseContractSerializer(serializers.ModelSerializer):
             start_date += relativedelta(months=1)
             
         return months_missing
+    
+class LeaseServiceScheduleSerializer(serializers.ModelSerializer):
+    lease_no = serializers.CharField(source='lease.lease_no', read_only=True)
+    client_name = serializers.CharField(source='lease.client.client_name', read_only=True)
+    item_name = serializers.CharField(source='lease.item.machine_name', read_only=True)
+    serial_no = serializers.CharField(source='lease.item.serial_no', read_only=True)
+    default_technicians = UserSerializer(many=True, read_only=True)
+    default_technician_ids = serializers.PrimaryKeyRelatedField(
+        source='default_technicians',
+        many=True,
+        queryset=CustomUser.objects.all(),
+        write_only=True,
+        required=False
+    )
+    
+    class Meta:
+        model = LeaseServiceSchedule
+        fields = [
+            'id', 'lease', 'lease_no', 'client_name', 'item_name', 'serial_no',
+            'service_type', 'frequency', 'frequency_months', 'start_date', 
+            'end_date', 'default_technicians', 'default_technician_ids', 
+            'lpo', 'is_active', 'created_at'
+        ]
+        read_only_fields = ['created_at']
 
 class LeasePartInquirySerializer(serializers.ModelSerializer):
     part = BasicPartSerializer(read_only=True)
@@ -730,7 +792,6 @@ class AccessorySerializer(serializers.ModelSerializer):
         } for item in sale_items if item.sale]
 
 class CallSerializer(serializers.ModelSerializer):
-    # Flattened fields for reading
     client_name_display = serializers.CharField(source='client.client_name', read_only=True)
     client_location_display = serializers.CharField(source='client.client_location', read_only=True)
     item_name = serializers.SerializerMethodField()
@@ -783,6 +844,22 @@ class CallSerializer(serializers.ModelSerializer):
         required=False,
         allow_empty=True,
     )
+    lease_service_schedule = LeaseServiceScheduleSerializer(read_only=True)
+    lease_service_schedule_id = serializers.PrimaryKeyRelatedField(
+        source='lease_service_schedule',
+        queryset=LeaseServiceSchedule.objects.all(),
+        write_only=True,
+        required=False,
+        allow_null=True
+    )
+    lease = LeaseContractSerializer(read_only=True)
+    lease_id = serializers.PrimaryKeyRelatedField(
+        source='lease',
+        queryset=LeaseContract.objects.all(),
+        write_only=True,
+        required=False,
+        allow_null=True
+    )
     
     class Meta:
         model = Call
@@ -796,7 +873,8 @@ class CallSerializer(serializers.ModelSerializer):
             'comments', 'status', 'department', 'is_checked', 'director_comment', 'ticket_no',
             'spare_description', 'created_at', 'walk_in_machine',
             'walk_in_machine_name', 'walk_in_machine_type', 'walk_in_serial_no', 'technician_manager_approval', 'client_verification',
-            'finish_time', 'start_time', 'lpo', 'images', 'image_urls',
+            'finish_time', 'start_time', 'lpo', 'images', 'image_urls', 'lease', 'lease_id',
+            'lease_service_schedule', 'lease_service_schedule_id'
         ]
         extra_kwargs = {
             'created_at': {'read_only': True},
@@ -1068,18 +1146,55 @@ class SaleItemSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Quantity must be at least 1.")
         return value
 
+class PaymentSerializer(serializers.ModelSerializer):
+    created_by = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Payment
+        fields = [
+            'id', 'sale', 'payment_date', 'amount', 'payment_method', 
+            'reference_number', 'notes', 'created_at', 'created_by'
+        ]
+        read_only_fields = ['created_at']
+    
+    def get_created_by(self, obj):
+        """Return created_by user details"""
+        if obj.created_by:
+            return {
+                'firstname': obj.created_by.firstname,
+                'lastname': obj.created_by.lastname
+            }
+        return None
+
 class SaleSerializer(serializers.ModelSerializer):
     sale_type = serializers.ChoiceField(choices=Sale.SALE_TYPE_CHOICES)
     client_name = serializers.CharField(write_only=True, required=False)
     client_location = serializers.CharField(write_only=True, required=False)
     items = SaleItemSerializer(many=True, required=True)
+    payments = PaymentSerializer(many=True, read_only=True)
     
     # Read-only calculated fields
     subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     vat_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    amount_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    remaining_balance = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    payment_status = serializers.CharField(read_only=True)
+    is_overdue = serializers.ReadOnlyField()
+    
     items_count = serializers.SerializerMethodField()
     client = serializers.SerializerMethodField()
+    payments_count = serializers.SerializerMethodField()
+    
+    # Payment fields for creation/update - UPDATED
+    initial_payment = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, write_only=True)
+    payment_method = serializers.ChoiceField(choices=Payment.PAYMENT_METHOD_CHOICES, required=False, write_only=True)
+    payment_reference = serializers.CharField(
+        max_length=100, 
+        required=False, 
+        allow_blank=True,  # ADDED: Allow blank values
+        write_only=True
+    )
     
     client_id = serializers.PrimaryKeyRelatedField(
         queryset=Client.objects.all(),
@@ -1108,9 +1223,14 @@ class SaleSerializer(serializers.ModelSerializer):
             'id', 'sale_no', 'client', 'client_id', 'items', 'add_vat', 'vat_rate',
             'client_name', 'client_location', 'sale_date', 'notes', 'created_at',
             'subtotal', 'vat_total', 'total_amount', 'items_count', 'sale_type', 'lpo',
-            'store_part_inquiry_id', 'store_acc_inquiry_id' 
+            'store_part_inquiry_id', 'store_acc_inquiry_id', 'payments', 'payments_count',
+            'payment_status', 'amount_paid', 'remaining_balance', 'due_date', 
+            'payment_notes', 'is_overdue', 'initial_payment', 'payment_method', 'payment_reference'
         ]
-        read_only_fields = ['sale_no', 'created_at', 'subtotal', 'vat_total', 'total_amount']
+        read_only_fields = [
+            'sale_no', 'created_at', 'subtotal', 'vat_total', 'total_amount',
+            'amount_paid', 'remaining_balance', 'payment_status'
+        ]
 
     def get_client(self, obj):
         if obj.client:
@@ -1128,6 +1248,9 @@ class SaleSerializer(serializers.ModelSerializer):
     
     def get_items_count(self, obj):
         return obj.items.count()
+    
+    def get_payments_count(self, obj):
+        return obj.payments.count()
 
     def validate(self, data):
         sale_type = data.get('sale_type')
@@ -1135,6 +1258,10 @@ class SaleSerializer(serializers.ModelSerializer):
         client_name = data.get('client_name')
         client_location = data.get('client_location')
         items = data.get('items', [])
+        initial_payment = data.get('initial_payment')
+        due_date = data.get('due_date')
+        payment_method = data.get('payment_method')
+        payment_reference = data.get('payment_reference', '').strip()
 
         # For Internal Sales: Require existing client
         if sale_type == 'Internal':
@@ -1152,12 +1279,30 @@ class SaleSerializer(serializers.ModelSerializer):
                     "client_location": "Required if no client selected"
                 })
 
+        # Validate initial payment
+        if initial_payment is not None and initial_payment < 0:
+            raise serializers.ValidationError({
+                "initial_payment": "Initial payment cannot be negative"
+            })
+
+        # ADDED: Validate payment reference for non-cash methods (optional but recommended)
+        # Remove this block if you don't want any validation for payment_reference
+        if initial_payment and initial_payment > 0:
+            if payment_method and payment_method not in ['Cash', 'Credit'] and not payment_reference:
+                # Optional warning - you can remove this if reference should be completely optional
+                pass  # Just a placeholder - reference is optional
+
         return data
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         sale_type = validated_data.get('sale_type')
         client = validated_data.get('client')
+        
+        # Extract payment data
+        initial_payment = validated_data.pop('initial_payment', None)
+        payment_method = validated_data.pop('payment_method', 'Cash')
+        payment_reference = validated_data.pop('payment_reference', '')
 
         # Handle client based on sale type
         if sale_type == 'Internal':
@@ -1165,7 +1310,6 @@ class SaleSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"client_id": "Client selection is required for internal sales."})
             
         elif sale_type == 'Local' and not client:
-            # Create or get client using name + location
             client_name = validated_data.pop('client_name')
             client_location = validated_data.pop('client_location', '')
 
@@ -1176,10 +1320,10 @@ class SaleSerializer(serializers.ModelSerializer):
             )
             validated_data['client'] = client
 
-        # Create the sale (without calculating totals yet)
+        # Create the sale
         sale = Sale.objects.create(**validated_data)
 
-        # Add sale items (this will trigger inventory updates)
+        # Add sale items
         for item_data in items_data:
             custom_data = {}
             if item_data.get('custom_item'):
@@ -1189,16 +1333,14 @@ class SaleSerializer(serializers.ModelSerializer):
                     'reference_no': item_data['custom_item'].get('reference_no', '')
                 }
             
-            # Prepare item creation data
             item_create_data = {
                 'sale': sale,
                 'sale_type': item_data['sale_type'],
                 'quantity': item_data['quantity'],
-                'unit_price': item_data['unit_price'],  # This should be VAT-exclusive from frontend
+                'unit_price': item_data['unit_price'],
                 'custom_item': custom_data if custom_data else None,
             }
             
-            # Add specific item reference
             if item_data.get('machine'):
                 item_create_data['machine'] = item_data['machine']
             elif item_data.get('part'):
@@ -1206,40 +1348,49 @@ class SaleSerializer(serializers.ModelSerializer):
             elif item_data.get('accessory'):
                 item_create_data['accessory'] = item_data['accessory']
             
-            # Create the item (this will handle inventory updates)
             SaleItem.objects.create(**item_create_data)
         
-        # Now calculate totals for the entire sale
+        # Calculate totals
         sale.calculate_totals()
         sale.save()
+        
+        # Create initial payment if provided
+        if initial_payment is not None and initial_payment > 0:
+            Payment.objects.create(
+                sale=sale,
+                amount=initial_payment,
+                payment_method=payment_method,
+                reference_number=payment_reference,  # Can be blank now
+                payment_date=sale.sale_date,
+                created_by=self.context['request'].user if self.context.get('request') else None
+            )
         
         return sale
     
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', [])
         
+        # Remove payment fields from update (they should be handled separately)
+        validated_data.pop('initial_payment', None)
+        validated_data.pop('payment_method', None)
+        validated_data.pop('payment_reference', None)
+        
         # Update sale fields
-        instance.sale_date = validated_data.get('sale_date', instance.sale_date)
-        instance.notes = validated_data.get('notes', instance.notes)
-        instance.add_vat = validated_data.get('add_vat', instance.add_vat)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
         instance.save()
 
-        # Update items
+        # Update items (simplified for brevity - same logic as before)
         existing_items = {item.id: item for item in instance.items.all()}
         
         for item_data in items_data:
             item_id = item_data.get('id')
             if item_id and item_id in existing_items:
-                # Update existing item
                 item = existing_items[item_id]
                 item.quantity = item_data.get('quantity', item.quantity)
                 item.unit_price = item_data.get('unit_price', item.unit_price)
-                item.total_price = item.quantity * item.unit_price
-                
-                # Update custom item if present
                 if 'custom_item' in item_data:
                     item.custom_item = item_data['custom_item']
-                
                 item.save()
                 del existing_items[item_id]
             else:
@@ -1249,6 +1400,10 @@ class SaleSerializer(serializers.ModelSerializer):
         # Delete removed items
         for item in existing_items.values():
             item.delete()
+
+        # Recalculate totals
+        instance.calculate_totals()
+        instance.save()
 
         return instance
     
@@ -1616,3 +1771,4 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
                 item.delete()
         
         return instance
+    

@@ -1,10 +1,10 @@
 from django.conf import settings
-from django.urls import path
+from django.urls import path, include
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from . import views
 from .file_views import ChatFileUploadView
 from django.conf.urls.static import static
-
+from rest_framework.routers import DefaultRouter
 
 urlpatterns = [
     path('users/', views.UserListCreate.as_view()),
@@ -22,6 +22,7 @@ urlpatterns = [
     path('permission-audit/<uuid:user_id>/', views.get_key_audit, name='get_key_audit'),
     path('stores/', views.StoreListCreate.as_view()),
     path('stores/<uuid:id>/', views.StoreRetrieveUpdateDestroy.as_view()),
+    path('user-stores/', views.UserStoreListView.as_view(), name='user-stores'),
     path('accessory-types/', views.AccessoryTypeListCreate.as_view()),
     path('accessory-types/<int:pk>/', views.AccessoryTypeRetrieveUpdateDestroy.as_view()),
     path('machine-types/', views.MachineTypeListCreate.as_view()),
@@ -54,8 +55,16 @@ urlpatterns = [
     path('leases/assign-technician/', views.LeaseAssignTechnician.as_view(), name='assign-technician'),
     # path('leases/my-handled-leases/', views.LeaseContractViewSet.as_view({'get': 'my_handled_leases'})),
     path('leases/assign-account-handler/', views.LeaseAssignAccountHandler.as_view(), name='bulk-assign-account-handler'),
+    path('lease-service-schedules/', views.LeaseServiceScheduleViewSet.as_view({'get': 'list', 'post': 'create'})),
+    path('lease-service-schedules/<uuid:pk>/', views.LeaseServiceScheduleViewSet.as_view({'get': 'retrieve', 'put': 'update', 'patch': 'partial_update', 'delete': 'destroy'})),
+    path('lease-service-schedules/<uuid:pk>/generate_calls/', views.LeaseServiceScheduleViewSet.as_view({'post': 'generate_calls'})),
+    path('lease-machine-swaps/', views.LeaseMachineSwapViewSet.as_view({'get': 'list', 'post': 'create'})),
+    path('payments/', views.PaymentViewSet.as_view({'get': 'list', 'post': 'create'})),
+    path('payments/<uuid:pk>/', views.PaymentViewSet.as_view({'get': 'retrieve', 'put': 'update', 'patch': 'partial_update', 'delete': 'destroy'})),
     path('sales/', views.SaleViewSet.as_view({'get': 'list', 'post': 'create'})),
     path('sales/<uuid:pk>/', views.SaleViewSet.as_view({'get': 'retrieve', 'put': 'update', 'patch': 'partial_update', 'delete': 'destroy'})),
+    path('sales/<uuid:pk>/payments/', views.SaleViewSet.as_view({'get': 'payments'})),
+    path('sales/<uuid:pk>/add_payment/', views.SaleViewSet.as_view({'post': 'add_payment'})),
     path('quotations/', views.QuotationViewSet.as_view({'get': 'list', 'post': 'create'})),
     path('quotations/<uuid:pk>/', views.QuotationViewSet.as_view({'get': 'retrieve', 'put': 'update', 'delete': 'destroy'})),
     path('quotations/<uuid:pk>/pdf/', views.QuotationPDFView.as_view(), name='quotation-pdf'),
@@ -93,4 +102,8 @@ urlpatterns = [
     path('purchase-orders/<uuid:pk>/submit/', views.PurchaseOrderViewSet.as_view({'post': 'submit_for_approval'})),
     path('purchase-orders/<uuid:pk>/verify/', views.PurchaseOrderViewSet.as_view({'post': 'verify'})),
     path('purchase-orders/<uuid:pk>/pdf/', views.PurchaseOrderPDFView.as_view(), name='purchase-order-pdf'),
+    path('health/', views.mobile_health_check, name='health_check'),
+    path('device/register/', views.mobile_device_info, name='device_register'),
+    path('test/', views.simple_test, name='simple_test'),
+    path('api/test/', views.simple_test, name='api_test'),
 ]

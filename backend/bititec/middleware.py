@@ -81,7 +81,6 @@ class SecurityMiddleware(MiddlewareMixin):
         
         # Check for common attack paths
         suspicious_paths = [
-            '/admin',
             '/wp-admin',
             '/phpMyAdmin',
             '/.env',

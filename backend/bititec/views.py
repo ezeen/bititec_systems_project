@@ -1,5 +1,6 @@
 from asyncio.log import logger
 import uuid
+from django.conf import settings
 from django.core.cache import cache
 import hashlib
 import os
@@ -7,14 +8,15 @@ import time
 import logging
 import re
 import secrets
+from django.db import models  
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions, status, filters, viewsets
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
 from .permissions import StorePermissionMixin
 from .middleware import SecurityUtils
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, KeyAudit, PurchaseOrder, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem
-from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeasePartInquirySerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, PurchaseOrderSerializer, QuotationSerializer, SaleSerializer, StorePartInquirySerializer, StoreAccessoryInquirySerializer, TransferSerializer, UserSerializer, RegisterSerializer, StoreSerializer
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeaseMachineSwap, LeasePartInquiry, LeaseServiceSchedule, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, KeyAudit, Payment, PurchaseOrder, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem
+from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeaseMachineSwapSerializer, LeasePartInquirySerializer, LeaseServiceScheduleSerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, PaymentSerializer, PurchaseOrderSerializer, QuotationSerializer, SaleSerializer, StorePartInquirySerializer, StoreAccessoryInquirySerializer, TransferSerializer, UserSerializer, RegisterSerializer, StoreSerializer
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.views import APIView
@@ -42,6 +44,8 @@ from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 from xhtml2pdf import pisa
 from PIL import Image
+from urllib.parse import urlparse
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -657,24 +661,19 @@ def get_key_audit(request, user_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def current_user(request):
-    """Get current user with permissions"""
+    """Get current user with permissions and stores"""
     user = request.user
     
-    # Add permissions context to response
-    user_data = {
-        'id': str(user.id),
-        'email': user.email,
-        'firstname': user.firstname,
-        'lastname': user.lastname,
-        'role': user.role,
-        'active': user.active,
-        'keys': user.keys,
-        'all_permissions': user.get_all_permissions(),
-        'security': {
-            'last_login': user.last_login.isoformat() if user.last_login else None,
-            'failed_attempts': user.failed_login_attempts,
-            'is_locked': user.is_locked()
-        }
+    # Serialize with stores included
+    serializer = UserSerializer(user, context={'request': request})
+    user_data = serializer.data
+    
+    # Add additional context
+    user_data['all_permissions'] = user.get_all_permissions()
+    user_data['security'] = {
+        'last_login': user.last_login.isoformat() if user.last_login else None,
+        'failed_attempts': user.failed_login_attempts,
+        'is_locked': user.is_locked()
     }
     
     return Response(user_data)
@@ -748,6 +747,21 @@ class StoreRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
         
         # If no inventory, proceed with deletion
         return super().destroy(request, *args, **kwargs)
+    
+class UserStoreListView(generics.ListAPIView):
+    serializer_class = StoreSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        """Return stores assigned to the current user"""
+        user = self.request.user
+        
+        # Directors and Super Admins can see all stores
+        if user.role in ['Director', 'Super Admin']:
+            return Store.objects.all()
+        
+        # Other users only see their assigned stores
+        return user.stores.all()
 
 class AccessoryTypeListCreate(generics.ListCreateAPIView):
     queryset = AccessoryType.objects.all()
@@ -1185,8 +1199,28 @@ class CallViewSet(viewsets.ModelViewSet):
     serializer_class = CallSerializer
     permission_classes = [permissions.IsAuthenticated]
     
+    def get_permissions(self):
+        """Override permissions based on action"""
+        if self.action in ['list', 'retrieve']:
+            # Allow all authenticated users to view
+            permission_classes = [permissions.IsAuthenticated]
+        elif self.action in ['create']:
+            # Restrict creation to specific roles
+            permission_classes = [permissions.IsAuthenticated, IsDirectorOrSuperAdminOrTechnicianManager]
+        elif self.action in ['update', 'partial_update']:
+            # Allow authenticated users - permission check happens in update() method
+            permission_classes = [permissions.IsAuthenticated]
+        elif self.action == 'destroy':
+            # Only directors/super admins can delete
+            permission_classes = [permissions.IsAuthenticated, IsDirectorOrSuperAdminOrTechnicianManager]
+        else:
+            permission_classes = [permissions.IsAuthenticated]
+        
+        return [permission() for permission in permission_classes]
+    
     def get_queryset(self):
-        status = self.request.query_params.get('status')
+        """Filter queryset based on user permissions"""
+        status_param = self.request.query_params.get('status')
         start_date = self.request.query_params.get('start_date')
         end_date = self.request.query_params.get('end_date')
         technician_id = self.request.query_params.get('technician')
@@ -1197,29 +1231,12 @@ class CallViewSet(viewsets.ModelViewSet):
             'item__store'
         ).prefetch_related('technician')
 
-        # Role-based filtering for different actions
-        user = self.request.user
-        user_role = user.role.lower() if user.role else ''
-        
-        # Allow full access to these roles
-        allowed_full_access_roles = ['director', 'super admin', 'technician manager']
-        
         # For GET requests (viewing), allow all authenticated users to see calls
         if self.action in ['list', 'retrieve']:
-            # All authenticated users can view service calls
             pass  # No filtering for view operations
-        else:
-            # For edit operations (POST, PUT, PATCH, DELETE), apply role restrictions
-            if user_role not in allowed_full_access_roles:
-                # If user is a technician, only show calls assigned to them for editing
-                if user_role == 'technician':
-                    queryset = queryset.filter(technician__id=user.id)
-                else:
-                    # For other roles, show no calls for editing or handle as needed
-                    queryset = queryset.none()
         
         # Status filtering
-        if status:
+        if status_param:
             status_mapping = {
                 'open': 'Open',
                 'pending': 'Pending',
@@ -1228,10 +1245,10 @@ class CallViewSet(viewsets.ModelViewSet):
                 'completed': 'Completed',
                 'closed': 'Closed'
             }
-            backend_status = status_mapping.get(status.lower(), status)
+            backend_status = status_mapping.get(status_param.lower(), status_param)
             queryset = queryset.filter(status=backend_status)
 
-         # Technician filtering
+        # Technician filtering
         if technician_id:
             queryset = queryset.filter(technician__id=technician_id)
 
@@ -1252,46 +1269,103 @@ class CallViewSet(viewsets.ModelViewSet):
                     
             except (ValueError, TypeError) as e:
                 raise ValidationError(f"Invalid date format. Use YYYY-MM-DD: {str(e)}") from e
+            
+        # Add lease filtering
+        lease_id = self.request.query_params.get('lease_id')
+        if lease_id:
+            queryset = queryset.filter(lease_id=lease_id)
 
         return queryset.order_by('-created_at')
     
-    def get_permissions(self):
-        """
-        Override permissions based on action
-        """
-        if self.action in ['list', 'retrieve']:
-            # Allow all authenticated users to view
-            permission_classes = [permissions.IsAuthenticated]
-        elif self.action in ['create', 'update', 'partial_update', 'destroy']:
-            # Restrict editing to specific roles
-            permission_classes = [permissions.IsAuthenticated, IsDirectorOrSuperAdminOrTechnicianManager]
-        else:
-            permission_classes = [permissions.IsAuthenticated]
+    def has_key_permission(self, user, key, action):
+        """Check if user has key-based permission for specific action"""
+        if not user.keys:
+            return False
         
-        return [permission() for permission in permission_classes]
+        key_data = user.keys.get(key)
+        if not key_data:
+            return False
+        
+        # Handle both old format (list) and new format (dict)
+        if isinstance(key_data, list):
+            return action in key_data
+        elif isinstance(key_data, dict):
+            actions = key_data.get('actions', [])
+            return action in actions
+        
+        return False
+    
+    def has_edit_permission(self, call, user):
+        """Check if user has permission to edit this call - includes key-based permissions"""
+        # Check if call is future-dated - nobody can edit
+        if call.reported_date:
+            call_date = call.reported_date if isinstance(call.reported_date, datetime) else datetime.fromisoformat(str(call.reported_date))
+            today = timezone.now().date()
+            if call_date.date() > today:
+                return False  # Nobody can edit future-dated calls
+        
+        # Closed calls can only be edited by Director or Technician Manager
+        if call.status and call.status.lower() == 'closed':
+            return user.role in ['Director', 'Technician Manager']
+        
+        # Director and Super Admin can always edit non-closed, non-future calls
+        if user.role in ['Director', 'Super Admin']:
+            return True
+        
+        # Technician Managers can edit any non-closed, non-future call
+        if user.role == 'Technician Manager':
+            return True
+        
+        # Check if user is an assigned technician
+        is_assigned_technician = call.technician.filter(id=user.id).exists()
+        
+        # Technicians can only edit if assigned
+        if user.role == 'Technician' and is_assigned_technician:
+            return True
+        
+        # Check key-based permissions for 'calls' with 'update' action
+        if self.has_key_permission(user, 'calls', 'update'):
+            # Users with calls:update permission can edit if assigned
+            if is_assigned_technician:
+                return True
+            # If you want users with calls:update to edit ANY call (not just assigned), uncomment below:
+            # return True
+        
+        return False
     
     def update(self, request, *args, **kwargs):
-        # Check if user has permission to edit this specific call
+        """Override update with comprehensive permission and validation checks"""
         instance = self.get_object()
         user = request.user
-        user_role = user.role.lower() if user.role else ''
         
-        allowed_full_access_roles = ['director', 'super admin', 'technician manager']
+        # Check edit permissions using the updated method
+        if not self.has_edit_permission(instance, user):
+            error_message = 'You do not have permission to edit this service call'
+            
+            # Provide specific error messages
+            if instance.reported_date:
+                call_date = instance.reported_date if isinstance(instance.reported_date, datetime) else datetime.fromisoformat(str(instance.reported_date))
+                today = timezone.now().date()
+                if call_date.date() > today:
+                    error_message = 'Cannot edit service calls scheduled for future dates'
+            
+            if instance.status and instance.status.lower() == 'closed':
+                error_message = 'Only Directors and Technician Managers can edit closed service calls'
+            
+            return Response(
+                {'error': error_message}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
         
-        # Check permissions for update
-        if user_role not in allowed_full_access_roles:
-            if user_role == 'technician':
-                # Technicians can only edit calls assigned to them
-                if not instance.technician.filter(id=user.id).exists():
-                    return Response(
-                        {'error': 'You can only edit service calls assigned to you'}, 
-                        status=status.HTTP_403_FORBIDDEN
-                    )
-            else:
-                return Response(
-                    {'error': 'You do not have permission to edit service calls'}, 
-                    status=status.HTTP_403_FORBIDDEN
-                )
+        # Check if trying to close without images
+        new_status = request.data.get('status')
+        if (new_status == 'Closed' and 
+            (not instance.images or len(instance.images) == 0) and
+            not request.data.get('force_close', False)):
+            return Response(
+                {'error': 'Cannot close service call without at least one image'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         old_status = instance.status
 
@@ -1320,16 +1394,20 @@ class CallViewSet(viewsets.ModelViewSet):
     def start_service(self, request, pk=None):
         """Start service call"""
         call = self.get_object()
-        
-        # Check permissions
         user = request.user
-        user_role = user.role.lower() if user.role else ''
-        allowed_roles = ['director', 'super admin', 'technician manager', 'technician']
         
-        if user_role not in allowed_roles:
-            return Response({'error': 'Permission denied'}, status=403)
+        # Check if call is future-dated
+        if call.reported_date:
+            call_date = call.reported_date if isinstance(call.reported_date, datetime) else datetime.fromisoformat(str(call.reported_date))
+            today = timezone.now().date()
+            if call_date.date() > today:
+                return Response({'error': 'Cannot start service calls scheduled for future dates'}, status=403)
         
-        if user_role == 'technician' and not call.technician.filter(id=user.id).exists():
+        # Check if user is assigned technician or has key permission
+        is_assigned = call.technician.filter(id=user.id).exists()
+        has_key_perm = self.has_key_permission(user, 'calls', 'update')
+        
+        if not (is_assigned or has_key_perm or user.role in ['Director', 'Super Admin', 'Technician Manager']):
             return Response({'error': 'You can only start calls assigned to you'}, status=403)
         
         if call.status != 'Pending':
@@ -1346,16 +1424,13 @@ class CallViewSet(viewsets.ModelViewSet):
     def complete_service(self, request, pk=None):
         """Complete service call"""
         call = self.get_object()
-        
-        # Check permissions
         user = request.user
-        user_role = user.role.lower() if user.role else ''
-        allowed_roles = ['director', 'super admin', 'technician manager', 'technician']
         
-        if user_role not in allowed_roles:
-            return Response({'error': 'Permission denied'}, status=403)
+        # Check if user is assigned technician or has key permission
+        is_assigned = call.technician.filter(id=user.id).exists()
+        has_key_perm = self.has_key_permission(user, 'calls', 'update')
         
-        if user_role == 'technician' and not call.technician.filter(id=user.id).exists():
+        if not (is_assigned or has_key_perm or user.role in ['Director', 'Super Admin', 'Technician Manager']):
             return Response({'error': 'You can only complete calls assigned to you'}, status=403)
         
         if call.status != 'In Progress':
@@ -1370,9 +1445,7 @@ class CallViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def create_access_token(self, request, pk=None):
-        """
-        Create a time-limited token for external users to access a specific service call
-        """
+        """Create a time-limited token for external users to access a specific service call"""
         call = self.get_object()
         email = request.data.get('email')
         
@@ -1386,7 +1459,6 @@ class CallViewSet(viewsets.ModelViewSet):
             expires_at=timezone.now() + timezone.timedelta(hours=1)
         )
         
-        # Return the token ID that will be used in the URL
         return Response({
             'token': str(token.id),
             'expires_at': token.expires_at
@@ -1411,7 +1483,7 @@ class CallViewSet(viewsets.ModelViewSet):
         
         if field in ['technician_manager_approval', 'client_verification']:
             setattr(call, field, value)
-            call.save()  # This will trigger status update
+            call.save()
             
         serializer = self.get_serializer(call)
         response_data = serializer.data
@@ -1420,28 +1492,29 @@ class CallViewSet(viewsets.ModelViewSet):
         
         return Response(response_data)
     
+    @staticmethod
     def is_mobile_request(request):
         """Detect if request is from mobile device"""
         user_agent = request.META.get('HTTP_USER_AGENT', '').lower()
         mobile_indicators = ['mobile', 'android', 'iphone', 'ipad', 'ipod', 'blackberry', 'windows phone']
         is_mobile_ua = any(indicator in user_agent for indicator in mobile_indicators)
         
-        # Also check custom header
         platform = request.META.get('HTTP_X_CLIENT_PLATFORM', '').lower()
         is_mobile_header = platform == 'mobile'
         
         return is_mobile_ua or is_mobile_header
     
+    @staticmethod
     def validate_image_file(uploaded_file, is_mobile=False):
         """Validate uploaded image file with mobile-specific rules"""
         errors = []
         
         # File size limits
-        max_size = 5 * 1024 * 1024 if is_mobile else 10 * 1024 * 1024  # 5MB mobile, 10MB desktop
+        max_size = 5 * 1024 * 1024 if is_mobile else 10 * 1024 * 1024
         if uploaded_file.size > max_size:
             size_mb = max_size // (1024 * 1024)
             errors.append(f'File too large. Maximum size: {size_mb}MB for {"mobile" if is_mobile else "desktop"}')
-            return errors  # Return early for oversized files
+            return errors
         
         # Content type validation
         allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
@@ -1453,20 +1526,17 @@ class CallViewSet(viewsets.ModelViewSet):
         
         # Try to open and validate the image
         try:
-            uploaded_file.seek(0)  # Reset file pointer
+            uploaded_file.seek(0)
             with Image.open(uploaded_file) as img:
-                # Verify it's actually an image
                 img.verify()
                 
-                # Check dimensions (prevent extremely large images)
-                uploaded_file.seek(0)  # Reset again
+                uploaded_file.seek(0)
                 with Image.open(uploaded_file) as img:
                     width, height = img.size
-                    max_dimension = 4096  # 4K max
+                    max_dimension = 4096
                     if width > max_dimension or height > max_dimension:
                         errors.append(f'Image dimensions too large: {width}x{height}. Maximum: {max_dimension}x{max_dimension}')
                     
-                    # Mobile-specific dimension warnings
                     if is_mobile and (width > 3000 or height > 3000):
                         logger.warning(f'Large image from mobile: {width}x{height}')
         
@@ -1474,7 +1544,7 @@ class CallViewSet(viewsets.ModelViewSet):
             errors.append(f'Invalid or corrupted image file: {str(e)}')
         
         finally:
-            uploaded_file.seek(0)  # Reset file pointer for actual use
+            uploaded_file.seek(0)
         
         return errors
     
@@ -1483,7 +1553,7 @@ class CallViewSet(viewsets.ModelViewSet):
         """Upload images for a service call"""
         call = self.get_object()
         
-        # Check permissions
+        # Check permissions using updated method that includes key permissions
         if not self.has_edit_permission(call, request.user):
             return Response(
                 {'error': 'You do not have permission to upload images for this call'},
@@ -1504,23 +1574,17 @@ class CallViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Check if this is a replacement upload
         replace_existing = request.POST.get('replace_existing', '').lower() == 'true'
 
         if replace_existing and call.images:
             for old_image_url in call.images:
                 try:
-                    # Handle both absolute and relative URLs
                     if old_image_url.startswith('http'):
-                        # Extract path from full URL
-                        from urllib.parse import urlparse
                         parsed_url = urlparse(old_image_url)
                         path = parsed_url.path
-                        # Remove /media/ prefix if present
                         if path.startswith('/media/'):
-                            path = path[7:]  # Remove '/media/'
+                            path = path[7:]
                     else:
-                        # Relative path
                         path = old_image_url.lstrip('/')
                     
                     if default_storage.exists(path):
@@ -1531,22 +1595,17 @@ class CallViewSet(viewsets.ModelViewSet):
                         
                 except Exception as e:
                     logger.error(f"Error deleting old image file: {e}")
-                # Continue anyway to avoid breaking the upload process
-    
 
         uploaded_urls = []
         
         for image in images:
             try:
-                # Validate image file
                 if not image.content_type.startswith('image/'):
                     continue
                     
-                # Generate unique filename
                 ext = os.path.splitext(image.name)[1]
                 filename = f"service_call_{call.id}_{uuid.uuid4().hex}{ext}"
                 
-                # Save file
                 path = default_storage.save(f"service_calls/{filename}", ContentFile(image.read()))
                 url = request.build_absolute_uri(default_storage.url(path))
                 
@@ -1562,16 +1621,14 @@ class CallViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Update call with new images (append to existing)
         if replace_existing:
-            # Replace all existing images with new ones
             call.images = uploaded_urls
             logger.info(f"Replaced images for call {call.id}: {len(uploaded_urls)} new images")
         else:
-            # Append to existing images (original behavior)
             current_images = call.images or []
             call.images = current_images + uploaded_urls
-            logger.info(f"Added images to call {call.id}: {len(uploaded_urls)} new images, {len(current_images)} existing")
+            logger.info(f"Added images to call {call.id}: {len(uploaded_urls)} new images")
+        
         call.save()
         
         return Response({'images': call.images}, status=status.HTTP_200_OK)
@@ -1581,17 +1638,25 @@ class CallViewSet(viewsets.ModelViewSet):
         """Remove an image from a service call"""
         call = self.get_object()
         image_url = request.data.get('image_url')
+        
         if not image_url:
             return Response(
                 {'error': 'Image URL is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Check permissions
+        # Check permissions using updated method that includes key permissions
         if not self.has_edit_permission(call, request.user):
             return Response(
                 {'error': 'You do not have permission to remove images from this call'},
                 status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check if call status allows image removal
+        if call.status not in ['In Progress', 'Completed']:
+            return Response(
+                {'error': 'Images can only be removed for calls with status "In Progress" or "Completed"'},
+                status=status.HTTP_400_BAD_REQUEST
             )
         
         if image_url not in (call.images or []):
@@ -1602,17 +1667,12 @@ class CallViewSet(viewsets.ModelViewSet):
         
         # Remove image from storage
         try:
-            # Handle both absolute and relative URLs
             if image_url.startswith('http'):
-                # Extract path from full URL
-                from urllib.parse import urlparse
                 parsed_url = urlparse(image_url)
                 path = parsed_url.path
-                # Remove /media/ prefix if present
                 if path.startswith('/media/'):
-                    path = path[7:]  # Remove '/media/'
+                    path = path[7:]
             else:
-                # Relative path
                 path = image_url.lstrip('/')
             
             if default_storage.exists(path):
@@ -1623,7 +1683,6 @@ class CallViewSet(viewsets.ModelViewSet):
                 
         except Exception as e:
             logger.error(f"Error deleting image file: {e}")
-            # Continue anyway to remove from database
         
         # Remove image URL from call
         updated_images = [img for img in (call.images or []) if img != image_url]
@@ -1631,41 +1690,6 @@ class CallViewSet(viewsets.ModelViewSet):
         call.save()
         
         return Response({'images': call.images}, status=status.HTTP_200_OK)
-    
-    def has_edit_permission(self, call, user):
-        """Check if user has permission to edit this call"""
-        # Director and Super Admin can always edit
-        if user.role in ['Director', 'Super Admin']:
-            return True
-        
-        # Check if user is an assigned technician
-        is_assigned_technician = call.technician.filter(id=user.id).exists()
-        
-        # Technician Managers can edit any call
-        if user.role == 'Technician Manager':
-            return True
-        
-        # Technicians can only edit if assigned
-        if user.role == 'Technician' and is_assigned_technician:
-            return True
-        
-        return False
-    
-    def update(self, request, *args, **kwargs):
-        """Override update to prevent closing without images"""
-        instance = self.get_object()
-        new_status = request.data.get('status')
-        
-        # Check if trying to close without images
-        if (new_status == 'Closed' and 
-            (not instance.images or len(instance.images) == 0) and
-            not request.data.get('force_close', False)):
-            return Response(
-                {'error': 'Cannot close service call without at least one image'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        return super().update(request, *args, **kwargs)
     
 @method_decorator(csrf_exempt, name='dispatch')
 class CallValidateTokenView(APIView):
@@ -1938,7 +1962,7 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
                 # Update machine status
                 if lease.item:
                     machine = lease.item
-                    machine.machine_status = 'Available'
+                    machine.machine_status = 'Maintenance'
                     machine.save()
                 
                 # Return updated lease data
@@ -1996,6 +2020,129 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
                 {'error': f'Failed to reinstate lease: {str(e)}'}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+        
+class LeaseServiceScheduleViewSet(viewsets.ModelViewSet):
+    serializer_class = LeaseServiceScheduleSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        queryset = LeaseServiceSchedule.objects.select_related(
+            'lease', 'lease__client', 'lease__item'
+        ).prefetch_related('default_technicians')
+        
+        lease_id = self.request.query_params.get('lease_id')
+        if lease_id:
+            queryset = queryset.filter(lease_id=lease_id)
+            
+        return queryset.order_by('-created_at')
+    
+    @action(detail=True, methods=['post'])
+    def generate_calls(self, request, pk=None):
+        """Manually generate service calls for a schedule"""
+        schedule = self.get_object()
+        generated_calls = schedule.generate_next_service_calls()
+        
+        serializer = CallSerializer(generated_calls, many=True)
+        return Response({
+            'message': f'Generated {len(generated_calls)} service calls',
+            'generated_calls': serializer.data
+        })
+    
+    def generate_next_service_calls(self):
+        """Generate service calls for the upcoming period"""
+        from datetime import date
+        from dateutil.relativedelta import relativedelta
+        
+        today = date.today()
+        if today > self.end_date or not self.is_active:
+            return []
+        
+        # Find the last generated service call for this schedule
+        last_call = Call.objects.filter(
+            lease_service_schedule=self
+        ).order_by('-reported_date').first()
+        
+        # Determine where to start generating from
+        if last_call:
+            start_from = last_call.reported_date.date() + relativedelta(months=self.frequency_months)
+        else:
+            start_from = self.start_date
+        
+        generated_calls = []
+        current_date = start_from
+        
+        # Generate calls until we reach today or the end date
+        while current_date <= self.end_date and current_date <= today:
+            # Check if call already exists for this period
+            existing_call = Call.objects.filter(
+                lease_service_schedule=self,
+                reported_date__year=current_date.year,
+                reported_date__month=current_date.month
+            ).exists()
+            
+            if not existing_call:
+                # Create the service call - ADD lease=self.lease
+                call = Call.objects.create(
+                    contract_type='Lease',
+                    service_type=self.service_type,
+                    lease=self.lease,  # ADD THIS LINE
+                    lease_service_schedule=self,
+                    client=self.lease.client,
+                    client_name=self.lease.client.client_name,
+                    client_location=self.lease.client.client_location,
+                    item=self.lease.item,
+                    department=self.lease.department,
+                    fault_reported=f"Scheduled {self.service_type} maintenance for {current_date.strftime('%B %Y')}",
+                    reported_by="System",
+                    reported_date=current_date,
+                    lpo=self.lpo,
+                    status='Open'
+                )
+                
+                # Assign default technicians
+                if self.default_technicians.exists():
+                    call.technician.set(self.default_technicians.all())
+                    call.status = 'Pending'
+                    call.save()
+                
+                generated_calls.append(call)
+            
+            # Move to next period
+            current_date += relativedelta(months=self.frequency_months)
+        
+        return generated_calls
+    
+class LeaseMachineSwapViewSet(viewsets.ModelViewSet):
+    serializer_class = LeaseMachineSwapSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        queryset = LeaseMachineSwap.objects.select_related(
+            'lease', 'old_machine', 'new_machine', 'swapped_by'
+        )
+        
+        # Filter by lease if provided
+        lease_id = self.request.query_params.get('lease')
+        if lease_id:
+            queryset = queryset.filter(lease_id=lease_id)
+        
+        return queryset.order_by('-swapped_at')
+    
+    def perform_create(self, serializer):
+        # Save the swap record with the current user
+        swap = serializer.save(swapped_by=self.request.user)
+        
+        # Update the lease with the new machine
+        lease = swap.lease
+        lease.item = swap.new_machine
+        lease.save()
+        
+        # Update machine statuses
+        swap.old_machine.machine_status = 'Maintenance'
+        swap.old_machine.save()
+        
+        swap.new_machine.machine_status = 'Leased'
+        swap.new_machine.save()
 
 class LeaseAssignAccountHandler(APIView):
     """Bulk assign account handler to multiple leases"""
@@ -2060,6 +2207,23 @@ class LeaseAssignTechnician(APIView):
             "technician_id": technician_id
         })
     
+class PaymentViewSet(viewsets.ModelViewSet):
+    serializer_class = PaymentSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        queryset = Payment.objects.select_related('sale', 'created_by')
+        
+        # Filter by sale if provided
+        sale_id = self.request.query_params.get('sale')
+        if sale_id:
+            queryset = queryset.filter(sale=sale_id)
+            
+        return queryset.order_by('-payment_date', '-created_at')
+    
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
 class SaleViewSet(viewsets.ModelViewSet):
     serializer_class = SaleSerializer
     permission_classes = [IsAuthenticated]
@@ -2068,14 +2232,17 @@ class SaleViewSet(viewsets.ModelViewSet):
         queryset = Sale.objects.select_related('client').prefetch_related(
             'items__machine',
             'items__part',
-            'items__accessory'
+            'items__accessory',
+            'payments'
         )
         
         # Apply filters
         client_id = self.request.query_params.get('client')
         client_name = self.request.query_params.get('client_name')
         sale_type = self.request.query_params.get('type')
+        payment_status = self.request.query_params.get('payment_status')
         store_inquiry = self.request.query_params.get('store_inquiry')
+        overdue_only = self.request.query_params.get('overdue_only')
         
         if client_id:
             queryset = queryset.filter(client=client_id)
@@ -2085,34 +2252,33 @@ class SaleViewSet(viewsets.ModelViewSet):
                 Q(local_client_name__icontains=client_name)
             )
         if sale_type:
-            # Filter through the items' sale_type
             queryset = queryset.filter(items__sale_type=sale_type).distinct()
+        if payment_status:
+            queryset = queryset.filter(payment_status=payment_status)
         if store_inquiry:
-            # Filter by store inquiry ID
             queryset = queryset.filter(
                 Q(store_part_inquiry_id=store_inquiry) | 
                 Q(store_acc_inquiry_id=store_inquiry)
+            )
+        if overdue_only == 'true':
+            queryset = queryset.filter(
+                payment_status='Overdue'
+            ).filter(
+                due_date__lt=timezone.now().date()
             )
             
         return queryset.order_by('-created_at')
     
     @transaction.atomic
     def create(self, request, *args, **kwargs):
-        """Create sale with proper VAT calculations"""
-        
+        """Create sale with proper VAT calculations and initial payment"""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
-        # Create the sale
         sale = serializer.save()
-        
-        # Refresh the sale from database to get related objects
         sale.refresh_from_db()
         
-        # Create a new serializer instance with the saved object
         response_serializer = self.get_serializer(sale)
-        
-        # Return the created sale data with 201 status
         headers = self.get_success_headers(response_serializer.data)
         return Response(response_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
     
@@ -2124,44 +2290,102 @@ class SaleViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         
-        # Save the sale
         sale = serializer.save()
-        
-        # Recalculate totals after update
         sale.calculate_totals()
         sale.save()
         
         return Response(serializer.data)
     
+    @action(detail=True, methods=['get'])
+    def payments(self, request, pk=None):
+        """List all payments for a specific sale"""
+        sale = self.get_object()
+        payments = sale.payments.all().order_by('-payment_date', '-created_at')
+        serializer = PaymentSerializer(payments, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def add_payment(self, request, pk=None):
+        """Add a payment to a specific sale"""
+        sale = self.get_object()
+        
+        payment_data = {
+            'sale': sale.id,
+            'amount': request.data.get('amount'),
+            'payment_method': request.data.get('payment_method', 'Cash'),
+            'reference_number': request.data.get('reference_number', ''), 
+            'payment_date': request.data.get('payment_date', timezone.now().date()),
+            'notes': request.data.get('notes', '')
+        }
+        
+        payment_serializer = PaymentSerializer(data=payment_data)
+        if payment_serializer.is_valid():
+            payment = payment_serializer.save(created_by=request.user)
+            
+            # Return updated sale data
+            sale.refresh_from_db()
+            sale_serializer = self.get_serializer(sale)
+            return Response({
+                'message': 'Payment added successfully',
+                'payment': payment_serializer.data,
+                'sale': sale_serializer.data
+            }, status=status.HTTP_201_CREATED)
+        
+        return Response(payment_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['get'])
+    def payment_summary(self, request):
+        """Get payment summary statistics"""
+        queryset = self.get_queryset()
+        
+        summary = queryset.aggregate(
+            total_sales=models.Sum('total_amount'),
+            total_paid=models.Sum('amount_paid'),
+            total_outstanding=models.Sum('remaining_balance'),
+            paid_count=models.Count('id', filter=models.Q(payment_status='Paid')),
+            partial_count=models.Count('id', filter=models.Q(payment_status='Partial')),
+            credit_count=models.Count('id', filter=models.Q(payment_status='Credit')),
+            overdue_count=models.Count('id', filter=models.Q(payment_status='Overdue'))
+        )
+        
+        return Response(summary)
+    
+    @action(detail=False, methods=['get'])
+    def overdue_sales(self, request):
+        """Get overdue sales"""
+        overdue_sales = self.get_queryset().filter(
+            due_date__lt=timezone.now().date(),
+            remaining_balance__gt=0
+        )
+        
+        # Update payment status for overdue sales
+        overdue_sales.update(payment_status='Overdue')
+        
+        serializer = self.get_serializer(overdue_sales, many=True)
+        return Response(serializer.data)
+    
     def perform_destroy(self, instance):
         """Return items to store before deleting sale"""
         with transaction.atomic():
-            
-            # Return items to store
+            # Return items to store (same logic as before)
             for item in instance.items.all():
-                
                 if item.machine:
                     machine = item.machine
                     machine.machine_status = 'Available'
                     machine.save()
-                    
                 elif item.part:
                     part = item.part
-                    old_quantity = part.quantity
                     part.quantity += item.quantity
                     if part.quantity > 0 and part.part_status == 'Out of Stock':
                         part.part_status = 'Available'
                     part.save()
-                    
                 elif item.accessory:
                     accessory = item.accessory
-                    old_quantity = accessory.quantity
                     accessory.quantity += item.quantity
                     if accessory.quantity > 0 and accessory.acc_status == 'Out of Stock':
                         accessory.acc_status = 'Available'
                     accessory.save()
                     
-            # Delete the sale
             instance.delete()
     
 class DeliveryViewSet(viewsets.ModelViewSet):
@@ -2974,3 +3198,52 @@ class PurchaseOrderPDFView(APIView):
         if pisa_status.err:
             return HttpResponse('PDF generation error', status=500)
         return response
+    
+
+# In views.py
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def mobile_health_check(request):
+    """Health check endpoint for mobile apps"""
+    return Response({
+        'status': 'healthy',
+        'server_time': timezone.now().isoformat(),
+        'debug': logging.DEBUG,
+        'features': {
+            'websockets': True,
+            'file_upload': True,
+            'real_time_chat': True,
+        }
+    })
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def mobile_device_info(request):
+    """Register mobile device information"""
+    device_data = {
+        'platform': request.META.get('HTTP_X_CLIENT_PLATFORM', 'unknown'),
+        'version': request.META.get('HTTP_X_CLIENT_VERSION', 'unknown'),
+        'user_agent': request.META.get('HTTP_USER_AGENT', ''),
+        'ip_address': get_client_ip(request),
+    }
+    
+    # Log device info for debugging
+    logger.info(f"Mobile device connected: {device_data}")
+    
+    return Response({
+        'status': 'registered',
+        'device_id': hashlib.md5(str(device_data).encode()).hexdigest()[:16]
+    })
+
+from django.http import HttpResponse
+from django.views.decorators.csrf import csrf_exempt
+
+@csrf_exempt
+def simple_test(request):
+    """Simple test endpoint without any security restrictions"""
+    return HttpResponse(
+        "✅ Django server is running and reachable! \n"
+        f"Server Time: {timezone.now().isoformat()} \n"
+        f"Debug Mode: {settings.DEBUG}",
+        content_type="text/plain"
+    )

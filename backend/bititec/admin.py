@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Accessory, AccessoryType, Call, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, KeyAudit, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, Machine, MachineType, MeterReading, Part, PartType, Quotation, QuotationItem, Sale, SaleItem, SecurityEvent, ServiceCallToken, Store, StoreAccessoryInquiry, StorePartInquiry
+from .models import Accessory, AccessoryType, Call, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, KeyAudit, LeaseAccInquiry, LeaseContract, LeasePartInquiry, LoginAttempt, Machine, MachineType, MeterReading, Part, PartType, Payment, Quotation, QuotationItem, Sale, SaleItem, SecurityEvent, ServiceCallToken, Store, StoreAccessoryInquiry, StorePartInquiry
 from django.utils.html import format_html
 
 class CustomUserAdmin(UserAdmin):
@@ -184,10 +184,32 @@ class CallAdmin(admin.ModelAdmin):
 
 @admin.register(LeaseContract)
 class LeaseContractAdmin(admin.ModelAdmin):
-    list_display = ('lease_no', 'client', 'item', 'contract_type', 'is_active')
+    list_display = ('lease_no', 'client', 'item', 'contract_type', 'is_active', 'account_handler_display')
     list_filter = ('contract_type', 'is_active', 'store')
     search_fields = ('lease_no', 'client__client_name', 'item__machine_name')
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at', 'account_handler_display')
+    
+    def account_handler_display(self, obj):
+        if obj.account_handler:
+            return f"{obj.account_handler.firstname} {obj.account_handler.lastname}"
+        return "Not Assigned"
+    account_handler_display.short_description = 'Account Handler'
+
+# Add payment summary actions to SaleAdmin
+class SaleActionMixin:
+    def recalculate_totals(self, request, queryset):
+        for sale in queryset:
+            sale.calculate_totals()
+            sale.save()
+        self.message_user(request, f'Recalculated totals for {queryset.count()} sales.')
+    recalculate_totals.short_description = "Recalculate totals for selected sales"
+
+    def update_payment_status(self, request, queryset):
+        for sale in queryset:
+            sale.update_payment_status()
+            sale.save()
+        self.message_user(request, f'Updated payment status for {queryset.count()} sales.')
+    update_payment_status.short_description = "Update payment status for selected sales"
 
 # Updated SaleItem inline with VAT handling
 class SaleItemInline(admin.TabularInline):
@@ -197,15 +219,25 @@ class SaleItemInline(admin.TabularInline):
     readonly_fields = ('subtotal', 'vat_amount', 'total_price')
     raw_id_fields = ('machine', 'part', 'accessory')
 
+class PaymentInline(admin.TabularInline):
+    model = Payment
+    extra = 0
+    fields = ('payment_date', 'amount', 'payment_method', 'reference_number', 'notes', 'created_by')
+    readonly_fields = ('created_by',)
+    
+    def get_queryset(self, request):
+        queryset = super().get_queryset(request)
+        return queryset.select_related('created_by')
+
 @admin.register(Sale)
 class SaleAdmin(admin.ModelAdmin):
-    list_display = ('sale_no', 'client_display', 'sale_type', 'sale_date', 'subtotal', 'vat_total', 'total_amount', 'created_at')
-    list_filter = ('sale_type', 'sale_date', 'add_vat', 'client')
+    list_display = ('sale_no', 'client_display', 'sale_type', 'sale_date', 'subtotal', 'vat_total', 'total_amount', 'amount_paid', 'remaining_balance', 'payment_status', 'is_overdue_display', 'created_at')
+    list_filter = ('sale_type', 'sale_date', 'add_vat', 'client', 'payment_status')
     search_fields = ('sale_no', 'client__client_name', 'local_client_name')
-    readonly_fields = ('sale_no', 'subtotal', 'vat_total', 'total_amount', 'created_at', 'updated_at')
+    readonly_fields = ('sale_no', 'subtotal', 'vat_total', 'total_amount', 'amount_paid', 'remaining_balance', 'payment_status', 'is_overdue_display', 'created_at', 'updated_at')
     date_hierarchy = 'sale_date'
-    raw_id_fields = ('client',)  # Removed 'store_inquiry' as it doesn't exist in Sale model
-    inlines = [SaleItemInline]
+    raw_id_fields = ('client', 'store_part_inquiry', 'store_acc_inquiry')
+    inlines = [SaleItemInline, PaymentInline]
     
     fieldsets = (
         ('Basic Information', {
@@ -216,11 +248,14 @@ class SaleAdmin(admin.ModelAdmin):
             'description': 'Configure VAT settings for this sale'
         }),
         ('Financial Summary', {
-            'fields': ('subtotal', 'vat_total', 'total_amount'),
+            'fields': ('subtotal', 'vat_total', 'total_amount', 'amount_paid', 'remaining_balance', 'payment_status')
+        }),
+        ('Payment Information', {
+            'fields': ('due_date', 'payment_notes', 'is_overdue_display'),
             'classes': ('collapse',)
         }),
         ('Additional Information', {
-            'fields': ('notes', 'store_part_inquiry', 'store_acc_inquiry'),  # Using correct field names
+            'fields': ('notes', 'store_part_inquiry', 'store_acc_inquiry'),
             'classes': ('collapse',)
         }),
         ('Metadata', {
@@ -236,6 +271,11 @@ class SaleAdmin(admin.ModelAdmin):
             return f"{obj.local_client_name} (Local)"
         return "Unknown Client"
     client_display.short_description = 'Client'
+    
+    def is_overdue_display(self, obj):
+        return obj.is_overdue
+    is_overdue_display.short_description = 'Overdue'
+    is_overdue_display.boolean = True
     
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
@@ -288,6 +328,64 @@ class SaleItemAdmin(admin.ModelAdmin):
         # Recalculate sale totals after saving item
         obj.sale.calculate_totals()
         obj.sale.save()
+
+@admin.register(Payment)
+class PaymentAdmin(admin.ModelAdmin):
+    list_display = ('sale_display', 'payment_date', 'amount', 'payment_method', 'reference_number', 'created_by_display', 'created_at')
+    list_filter = ('payment_method', 'payment_date', 'created_at')
+    search_fields = ('sale__sale_no', 'reference_number', 'created_by__email')
+    readonly_fields = ('created_at', 'created_by_display')
+    raw_id_fields = ('sale', 'created_by')
+    date_hierarchy = 'payment_date'
+    
+    fieldsets = (
+        ('Payment Information', {
+            'fields': ('sale', 'payment_date', 'amount', 'payment_method', 'reference_number')
+        }),
+        ('Additional Details', {
+            'fields': ('notes', 'created_by_display'),
+            'classes': ('collapse',)
+        }),
+        ('Metadata', {
+            'fields': ('created_at',),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def sale_display(self, obj):
+        return obj.sale.sale_no if obj.sale else "No Sale"
+    sale_display.short_description = 'Sale Number'
+    
+    def created_by_display(self, obj):
+        if obj.created_by:
+            return f"{obj.created_by.firstname} {obj.created_by.lastname} ({obj.created_by.email})"
+        return "System"
+    created_by_display.short_description = 'Created By'
+    
+    def save_model(self, request, obj, form, change):
+        if not change:  # Only set created_by on creation
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
+        
+        # Update the sale's payment status after saving payment
+        if obj.sale:
+            obj.sale.calculate_totals()
+            obj.sale.update_payment_status()
+            obj.sale.save()
+
+# Add Payment actions for bulk operations
+class PaymentActionMixin:
+    def mark_as_cash_payments(self, request, queryset):
+        updated = queryset.update(payment_method='Cash')
+        self.message_user(request, f'{updated} payments marked as Cash.')
+    mark_as_cash_payments.short_description = "Mark selected payments as Cash"
+
+    def mark_as_bank_transfer_payments(self, request, queryset):
+        updated = queryset.update(payment_method='Bank Transfer')
+        self.message_user(request, f'{updated} payments marked as Bank Transfer.')
+    mark_as_bank_transfer_payments.short_description = "Mark selected payments as Bank Transfer"
+
+PaymentAdmin.actions = ['mark_as_cash_payments', 'mark_as_bank_transfer_payments']
 
 @admin.register(Delivery)
 class DeliveryAdmin(admin.ModelAdmin):
