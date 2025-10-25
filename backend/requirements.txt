@@ -15,6 +15,5 @@ gunicorn
 python-dateutil
 Pillow
 xhtml2pdf
-pycairo==1.26.1
 PyJWT
 django-csp

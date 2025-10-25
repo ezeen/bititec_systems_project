@@ -41,6 +41,11 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install system dependencies for pycairo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev pkg-config python3-dev
+
       - name: Cache pip dependencies
         uses: actions/cache@v3
         with:
@@ -135,7 +140,7 @@ jobs:
             if docker compose ps backend_bititecsystems | grep -q "Up"; then
               echo "✅ Backend container is running"
 
-              echo "🔍 Existing migrations:"
+              echo "📂 Existing migrations:"
               docker compose exec -T backend_bititecsystems ls -l backend/bititec/migrations || echo "⚠️ No migration files found"
 
               echo "🗄️ Applying migrations..."
