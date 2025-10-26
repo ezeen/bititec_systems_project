@@ -12,6 +12,7 @@ db.sqlite3
 # Django media uploads (keep out of Git)
 /backend/media/
 /frontend/my-app/build/
+/backend/logs/
 
 # Node modules (emailserver & frontend)
 /emailserver/node_modules/
@@ -30,3 +31,4 @@ db.sqlite3
 Thumbs.db
 
 test.tsx
+node_modules
