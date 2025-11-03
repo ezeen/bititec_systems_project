@@ -680,11 +680,13 @@ class Part(models.Model):
                     'id': str(item.transfer.id),
                     'from_store': {
                         'id': str(item.transfer.from_store.id),
-                        'store_name': item.transfer.from_store.store_name
+                        'storeName': item.transfer.from_store.store_name,  # Use storeName to match frontend
+                        'storeLocation': item.transfer.from_store.store_location  # Use storeLocation to match frontend
                     },
                     'to_store': {
                         'id': str(item.transfer.to_store.id),
-                        'store_name': item.transfer.to_store.store_name
+                        'storeName': item.transfer.to_store.store_name,  # Use storeName to match frontend
+                        'storeLocation': item.transfer.to_store.store_location  # Use storeLocation to match frontend
                     },
                     'created_at': item.transfer.created_at.isoformat(),
                     'status': item.transfer.status,
@@ -702,11 +704,13 @@ class Part(models.Model):
                     'id': str(item.transfer.id),
                     'from_store': {
                         'id': str(item.transfer.from_store.id),
-                        'store_name': item.transfer.from_store.store_name
+                        'storeName': item.transfer.from_store.store_name,  # Use storeName to match frontend
+                        'storeLocation': item.transfer.from_store.store_location  # Use storeLocation to match frontend
                     },
                     'to_store': {
                         'id': str(item.transfer.to_store.id),
-                        'store_name': item.transfer.to_store.store_name
+                        'storeName': item.transfer.to_store.store_name,  # Use storeName to match frontend
+                        'storeLocation': item.transfer.to_store.store_location  # Use storeLocation to match frontend
                     },
                     'created_at': item.transfer.created_at.isoformat(),
                     'status': item.transfer.status,
@@ -829,15 +833,21 @@ class Accessory(models.Model):
                     'id': str(item.transfer.id),
                     'from_store': {
                         'id': str(item.transfer.from_store.id),
-                        'store_name': item.transfer.from_store.store_name
+                        'storeName': item.transfer.from_store.store_name,  # Use storeName to match frontend
+                        'storeLocation': item.transfer.from_store.store_location  # Use storeLocation to match frontend
                     },
                     'to_store': {
                         'id': str(item.transfer.to_store.id),
-                        'store_name': item.transfer.to_store.store_name
+                        'storeName': item.transfer.to_store.store_name,  # Use storeName to match frontend
+                        'storeLocation': item.transfer.to_store.store_location  # Use storeLocation to match frontend
                     },
                     'created_at': item.transfer.created_at.isoformat(),
                     'status': item.transfer.status,
-                    'notes': item.transfer.notes
+                    'notes': item.transfer.notes,
+                    'created_by': {
+                        'firstname': item.transfer.created_by.firstname,
+                        'lastname': item.transfer.created_by.lastname
+                    } if item.transfer.created_by else None
                 },
                 'quantity': item.quantity,
                 'transfer_type': 'outgoing',
@@ -851,15 +861,21 @@ class Accessory(models.Model):
                     'id': str(item.transfer.id),
                     'from_store': {
                         'id': str(item.transfer.from_store.id),
-                        'store_name': item.transfer.from_store.store_name
+                        'storeName': item.transfer.from_store.store_name,  # Use storeName to match frontend
+                        'storeLocation': item.transfer.from_store.store_location  # Use storeLocation to match frontend
                     },
                     'to_store': {
                         'id': str(item.transfer.to_store.id),
-                        'store_name': item.transfer.to_store.store_name
+                        'storeName': item.transfer.to_store.store_name,  # Use storeName to match frontend
+                        'storeLocation': item.transfer.to_store.store_location  # Use storeLocation to match frontend
                     },
                     'created_at': item.transfer.created_at.isoformat(),
                     'status': item.transfer.status,
-                    'notes': item.transfer.notes
+                    'notes': item.transfer.notes,
+                    'created_by': {
+                        'firstname': item.transfer.created_by.firstname,
+                        'lastname': item.transfer.created_by.lastname
+                    } if item.transfer.created_by else None
                 },
                 'quantity': item.quantity,
                 'transfer_type': 'incoming',
@@ -1006,6 +1022,8 @@ class Call(models.Model):
     fault_reported = models.TextField()
     action_taken = models.TextField(blank=True, default='')
     meter_reading = models.PositiveIntegerField(default=0)
+    color_meter_reading = models.PositiveIntegerField(default=0)
+    mono_meter_reading = models.PositiveIntegerField(default=0)
     parts_required = models.TextField(blank=True, default='')  
     parts_used = models.TextField(blank=True, default='')
     comments = models.TextField(blank=True)
@@ -1098,6 +1116,14 @@ class StorePartInquiry(models.Model):
     issued_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='issued_part_inquiries')  # Fixed: unique related_name
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
     notes = models.TextField(blank=True)
+    lease = models.ForeignKey(
+        'LeaseContract', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='store_part_inquiries',
+        help_text="Associated lease for billing this part request"
+    )
 
     class Meta:
         ordering = ['-requested_at']
@@ -1121,6 +1147,14 @@ class StoreAccessoryInquiry(models.Model):
     issued_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='issued_accessory_inquiries')  # Fixed: unique related_name
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
     notes = models.TextField(blank=True)
+    lease = models.ForeignKey(
+        'LeaseContract', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='store_accessory_inquiries',
+        help_text="Associated lease for billing this accessory request"
+    )
 
     class Meta:
         ordering = ['-requested_at']
@@ -1156,6 +1190,13 @@ class LeaseContract(models.Model):
         ('Maintenance', 'Maintenance'),
     ]
     
+    PAYMENT_STATUS_CHOICES = [
+        ('Paid', 'Paid'),
+        ('Partial', 'Partial'),
+        ('Unpaid', 'Unpaid'),
+        ('Overdue', 'Overdue'),
+    ]
+    
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     client = models.ForeignKey(Client, on_delete=models.PROTECT)
     department = models.CharField(max_length=100)
@@ -1179,8 +1220,6 @@ class LeaseContract(models.Model):
         related_name='handled_leases',
         help_text="User responsible for managing this lease account"
     )
-    
-    # Keep technician field for backward compatibility if needed
     technician = models.ForeignKey(
         CustomUser, 
         on_delete=models.SET_NULL, 
@@ -1190,6 +1229,38 @@ class LeaseContract(models.Model):
         limit_choices_to={'role__in': ['Technician', 'Technician Manager']},
         help_text="Technician assigned for maintenance/support"
     )
+    
+    # Initial counter readings (for used machines)
+    initial_mono_counter = models.PositiveIntegerField(
+        default=0,
+        help_text="Initial monochrome counter reading when lease started (for used machines)"
+    )
+    initial_color_counter = models.PositiveIntegerField(
+        default=0,
+        null=True,
+        blank=True,
+        help_text="Initial color counter reading when lease started (for used color machines)"
+    )
+    
+    # Per-copy rates
+    monochrome_rate = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0,
+        help_text="Rate per monochrome/B&W copy"
+    )
+    color_rate = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0,
+        help_text="Rate per color copy (for color machines only)"
+    )
+    
+    # Payment tracking
+    amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    remaining_balance = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='Unpaid')
+    payment_notes = models.TextField(blank=True, null=True)
 
     def __str__(self):
         return f"{self.lease_no} - {self.client.client_name}"
@@ -1203,6 +1274,233 @@ class LeaseContract(models.Model):
         now = timezone.now()
         random_num = random.randint(10000, 99999)
         return f"LN-{now.month:02d}/{now.strftime('%y')}/{random_num}"
+
+    def calculate_month_bill(self, meter_reading):
+        """
+        Calculate bill for a specific month based on meter reading.
+        For the first reading in the lease, uses initial counters if available,
+        otherwise treats it as the baseline (no billing).
+        For subsequent readings, calculates based on the previous reading.
+        Returns dict with breakdown of charges.
+        """
+        if not meter_reading:
+            return {
+                'base_amount': 0,
+                'vat_amount': 0,
+                'myq_amount': 0,
+                'total_amount': 0,
+                'color_copies': 0,
+                'mono_copies': 0,
+                'is_baseline': False,
+                'has_previous': False
+            }
+        
+        # Find previous reading for this lease (chronologically before this one)
+        previous_reading = MeterReading.objects.filter(
+            lease=self,
+            month__lt=meter_reading.month
+        ).order_by('-month').first()
+        
+        # Check if this is the first reading ever for this lease
+        is_first_reading = not previous_reading
+        
+        # Initialize variables
+        base_amount = 0
+        color_copies_billed = 0
+        mono_copies_billed = 0
+        is_baseline = False
+        
+        if self.item.color_type == 'Color':
+            # Color machine: calculate both color and mono copies
+            current_color = meter_reading.color_meter_reading or 0
+            current_mono = meter_reading.mono_meter_reading or 0
+            
+            if is_first_reading:
+                # First reading - check if we have initial counters
+                if self.initial_mono_counter > 0 or self.initial_color_counter > 0:
+                    # We have initial counters, use them for billing
+                    color_copies_billed = max(0, current_color - (self.initial_color_counter or 0))
+                    mono_copies_billed = max(0, current_mono - self.initial_mono_counter)
+                else:
+                    # No initial counters - treat this as baseline (no billing)
+                    is_baseline = True
+                    color_copies_billed = 0
+                    mono_copies_billed = 0
+            else:
+                # Subsequent readings - subtract from previous month
+                previous_color = previous_reading.color_meter_reading or 0
+                previous_mono = previous_reading.mono_meter_reading or 0
+                
+                color_copies_billed = max(0, current_color - previous_color)
+                mono_copies_billed = max(0, current_mono - previous_mono)
+            
+            if not is_baseline:
+                base_amount = (float(self.color_rate) * color_copies_billed) + \
+                            (float(self.monochrome_rate) * mono_copies_billed)
+        else:
+            # Monochrome machine: only mono copies
+            current_mono = meter_reading.mono_meter_reading or meter_reading.meter_reading or 0
+            
+            if is_first_reading:
+                # First reading - check if we have initial counter
+                if self.initial_mono_counter > 0:
+                    # We have initial counter, use it for billing
+                    mono_copies_billed = max(0, current_mono - self.initial_mono_counter)
+                else:
+                    # No initial counter - treat this as baseline (no billing)
+                    is_baseline = True
+                    mono_copies_billed = 0
+            else:
+                # Subsequent readings - subtract from previous month
+                previous_mono = previous_reading.mono_meter_reading or previous_reading.meter_reading or 0
+                mono_copies_billed = max(0, current_mono - previous_mono)
+            
+            if not is_baseline:
+                base_amount = float(self.monochrome_rate) * mono_copies_billed
+        
+        # Calculate MyQ charges (if subscription type and not baseline)
+        myq_amount = 0
+        if self.add_myq and not is_baseline:
+            myq_payment = self.myq_payments.first()
+            if myq_payment and myq_payment.payment_type == 'subscription':
+                if self.item.color_type == 'Color':
+                    myq_amount = (float(myq_payment.color_rate) * color_copies_billed) + \
+                                (float(myq_payment.monochrome_rate) * mono_copies_billed)
+                else:
+                    myq_amount = float(myq_payment.monochrome_rate) * mono_copies_billed
+        
+        # Calculate VAT on base + MyQ subscription
+        subtotal = base_amount + myq_amount
+        vat_amount = float(subtotal * Decimal('0.16')) if self.add_vat else 0
+        
+        total_amount = subtotal + vat_amount
+        
+        return {
+            'base_amount': base_amount,
+            'myq_amount': myq_amount,
+            'vat_amount': vat_amount,
+            'total_amount': total_amount,
+            'color_copies': color_copies_billed,
+            'mono_copies': mono_copies_billed,
+            'is_baseline': is_baseline,
+            'has_previous': not is_first_reading
+        }
+
+    def update_payment_status(self):
+        """Update payment status based on amounts - now checks all monthly bills"""
+        # Calculate total unpaid amount across all meter readings
+        total_billed = 0
+        for reading in self.meter_readings.all():
+            bill = self.calculate_month_bill(reading)
+            total_billed += bill['total_amount']
+        
+        # Add one-off MyQ payment if applicable and not paid
+        if self.add_myq and not self.billed_myq:
+            myq_payment = self.myq_payments.first()
+            if myq_payment and myq_payment.payment_type == 'one_off':
+                total_billed += float(myq_payment.one_off_amount)
+        
+        if self.amount_paid >= total_billed and total_billed > 0:
+            self.payment_status = 'Paid'
+            self.remaining_balance = 0
+        elif self.amount_paid > 0:
+            self.payment_status = 'Partial'
+            self.remaining_balance = total_billed - float(self.amount_paid)
+        else:
+            self.payment_status = 'Unpaid'
+            self.remaining_balance = total_billed
+
+class LeasePayment(models.Model):
+    PAYMENT_METHOD_CHOICES = [
+        ('Cash', 'Cash'),
+        ('Bank Transfer', 'Bank Transfer'),
+        ('Mobile Money', 'Mobile Money'),
+        ('Check', 'Check'),
+        ('Card', 'Card'),
+    ]
+    
+    PAYMENT_TYPE_CHOICES = [
+        ('monthly_bill', 'Monthly Bill'),
+        ('myq_one_off', 'MyQ One-Off Payment'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lease = models.ForeignKey(LeaseContract, on_delete=models.CASCADE, related_name='payments')
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES)
+    payment_type = models.CharField(max_length=20, choices=PAYMENT_TYPE_CHOICES, default='monthly_bill')
+    reference_number = models.CharField(max_length=100, blank=True, null=True)
+    payment_date = models.DateField(default=timezone.now)
+    notes = models.TextField(blank=True, null=True)
+    
+    # Link to specific meter reading if this is a monthly bill payment
+    meter_reading = models.ForeignKey(
+        'MeterReading', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='payments'
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True)
+    
+    def __str__(self):
+        return f"Payment {self.reference_number} - {self.amount}"
+
+    class Meta:
+        ordering = ['-payment_date', '-created_at']
+
+class MyQPayment(models.Model):
+    MYQ_PAYMENT_TYPE_CHOICES = [
+        ('one_off', 'One-Off Payment'),
+        ('subscription', 'Subscription'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lease = models.ForeignKey(
+        'LeaseContract', 
+        on_delete=models.CASCADE, 
+        related_name='myq_payments'
+    )
+    payment_type = models.CharField(
+        max_length=20, 
+        choices=MYQ_PAYMENT_TYPE_CHOICES,
+        default='subscription'
+    )
+    # For one-off payments
+    one_off_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0,
+        null=True,
+        blank=True
+    )
+    # For subscription payments - rates per copy
+    color_rate = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0,
+        null=True,
+        blank=True,
+        help_text="MyQ rate per color copy (for color machines)"
+    )
+    monochrome_rate = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0,
+        null=True,
+        blank=True,
+        help_text="MyQ rate per monochrome copy"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"MyQ Payment - {self.get_payment_type_display()} - Lease {self.lease.lease_no}"
+
+    class Meta:
+        ordering = ['-created_at']
     
 class LeaseMachineSwap(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1612,6 +1910,21 @@ class LeasePartInquiry(models.Model):
     is_paid = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    payment_type = models.CharField(
+        max_length=20, 
+        choices=[('full', 'Full Payment'), ('partial', 'Partial Payment'), ('credit', 'Credit')],
+        default='credit'
+    )
+    initial_payment = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    remaining_balance = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    payment_status = models.CharField(
+        max_length=20,
+        choices=[('Paid', 'Paid'), ('Partial', 'Partial'), ('Unpaid', 'Unpaid'), ('Overdue', 'Overdue')],
+        default='Unpaid'
+    )
+    due_date = models.DateField(null=True, blank=True)
+    payment_notes = models.TextField(blank=True, null=True)
 
     def calculate_totals(self):
         """Calculate subtotal, VAT, and total amount"""
@@ -1624,8 +1937,44 @@ class LeasePartInquiry(models.Model):
             
         self.total_amount = self.subtotal + self.vat_amount
 
+    def update_payment_status(self):
+        """Update payment status based on amount paid"""
+        from datetime import date
+        
+        if self.amount_paid >= self.total_amount:
+            self.payment_status = 'Paid'
+            self.remaining_balance = Decimal('0')
+        elif self.amount_paid > 0:
+            self.payment_status = 'Partial'
+            self.remaining_balance = self.total_amount - self.amount_paid
+        else:
+            self.payment_status = 'Unpaid'
+            self.remaining_balance = self.total_amount
+        
+        # Check if overdue
+        if self.remaining_balance > 0 and self.due_date and self.due_date < date.today():
+            self.payment_status = 'Overdue'
+        
+        self.save()
+
     def save(self, *args, **kwargs):
         self.calculate_totals()
+        
+        # Calculate remaining balance on creation
+        if not self.pk:
+            if self.payment_type == 'full':
+                self.amount_paid = self.total_amount
+                self.remaining_balance = Decimal('0')
+                self.payment_status = 'Paid'
+            elif self.payment_type == 'partial':
+                self.amount_paid = self.initial_payment
+                self.remaining_balance = self.total_amount - self.initial_payment
+                self.payment_status = 'Partial'
+            else:  # credit
+                self.amount_paid = Decimal('0')
+                self.remaining_balance = self.total_amount
+                self.payment_status = 'Unpaid'
+        
         super().save(*args, **kwargs)
 
     class Meta:
@@ -1647,6 +1996,21 @@ class LeaseAccInquiry(models.Model):
     is_paid = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    payment_type = models.CharField(
+        max_length=20, 
+        choices=[('full', 'Full Payment'), ('partial', 'Partial Payment'), ('credit', 'Credit')],
+        default='credit'
+    )
+    initial_payment = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    remaining_balance = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    payment_status = models.CharField(
+        max_length=20,
+        choices=[('Paid', 'Paid'), ('Partial', 'Partial'), ('Unpaid', 'Unpaid'), ('Overdue', 'Overdue')],
+        default='Unpaid'
+    )
+    due_date = models.DateField(null=True, blank=True)
+    payment_notes = models.TextField(blank=True, null=True)
 
     def calculate_totals(self):
         """Calculate subtotal, VAT, and total amount"""
@@ -1661,10 +2025,117 @@ class LeaseAccInquiry(models.Model):
 
     def save(self, *args, **kwargs):
         self.calculate_totals()
+        
+        # Calculate remaining balance on creation
+        if not self.pk:
+            if self.payment_type == 'full':
+                self.amount_paid = self.total_amount
+                self.remaining_balance = Decimal('0')
+                self.payment_status = 'Paid'
+            elif self.payment_type == 'partial':
+                self.amount_paid = self.initial_payment
+                self.remaining_balance = self.total_amount - self.initial_payment
+                self.payment_status = 'Partial'
+            else:  # credit
+                self.amount_paid = Decimal('0')
+                self.remaining_balance = self.total_amount
+                self.payment_status = 'Unpaid'
+        
         super().save(*args, **kwargs)
+
+    def update_payment_status(self):
+        """Update payment status based on amount paid"""
+        from datetime import date
+        
+        if self.amount_paid >= self.total_amount:
+            self.payment_status = 'Paid'
+            self.remaining_balance = Decimal('0')
+        elif self.amount_paid > 0:
+            self.payment_status = 'Partial'
+            self.remaining_balance = self.total_amount - self.amount_paid
+        else:
+            self.payment_status = 'Unpaid'
+            self.remaining_balance = self.total_amount
+        
+        # Check if overdue
+        if self.remaining_balance > 0 and self.due_date and self.due_date < date.today():
+            self.payment_status = 'Overdue'
+        
+        self.save()
 
     class Meta:
         ordering = ['-date']
+
+class LeasePartInquiryPayment(models.Model):
+    PAYMENT_METHOD_CHOICES = [
+        ('Cash', 'Cash'),
+        ('Bank Transfer', 'Bank Transfer'),
+        ('Mobile Money', 'Mobile Money'),
+        ('Check', 'Check'),
+        ('Card', 'Card'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    inquiry = models.ForeignKey(
+        LeasePartInquiry, 
+        on_delete=models.CASCADE, 
+        related_name='payments'
+    )
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES, default='Cash')
+    reference_number = models.CharField(max_length=100, blank=True, null=True)
+    payment_date = models.DateField()
+    notes = models.TextField(blank=True, null=True)
+    created_by = models.ForeignKey(
+        CustomUser, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        related_name='part_inquiry_payments_created'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-payment_date', '-created_at']
+    
+    def __str__(self):
+        return f"Payment of {self.amount} for {self.inquiry.part.part_name}"
+
+
+class LeaseAccInquiryPayment(models.Model):
+    PAYMENT_METHOD_CHOICES = [
+        ('Cash', 'Cash'),
+        ('Bank Transfer', 'Bank Transfer'),
+        ('Mobile Money', 'Mobile Money'),
+        ('Check', 'Check'),
+        ('Card', 'Card'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    inquiry = models.ForeignKey(
+        LeaseAccInquiry, 
+        on_delete=models.CASCADE, 
+        related_name='payments'
+    )
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES, default='Cash')
+    reference_number = models.CharField(max_length=100, blank=True, null=True)
+    payment_date = models.DateField()
+    notes = models.TextField(blank=True, null=True)
+    created_by = models.ForeignKey(
+        CustomUser, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        related_name='acc_inquiry_payments_created'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-payment_date', '-created_at']
+    
+    def __str__(self):
+        return f"Payment of {self.amount} for {self.inquiry.accessory.acc_name}"
 
 class MeterReading(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1672,6 +2143,8 @@ class MeterReading(models.Model):
     machine = models.ForeignKey(Machine, on_delete=models.CASCADE)
     month = models.DateField()  
     meter_reading = models.PositiveIntegerField()
+    color_meter_reading = models.PositiveIntegerField(null=True, blank=True)
+    mono_meter_reading = models.PositiveIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1681,7 +2154,6 @@ class MeterReading(models.Model):
 
     def __str__(self):
         return f"{self.lease.lease_no} - {self.month.strftime('%b %Y')}"
-
     
 class Quotation(models.Model):
     STATUS_CHOICES = [

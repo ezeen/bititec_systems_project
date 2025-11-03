@@ -15,13 +15,14 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
 from .permissions import StorePermissionMixin
 from .middleware import SecurityUtils
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeaseMachineSwap, LeasePartInquiry, LeaseServiceSchedule, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, KeyAudit, Payment, PurchaseOrder, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem
-from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeaseMachineSwapSerializer, LeasePartInquirySerializer, LeaseServiceScheduleSerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, PaymentSerializer, PurchaseOrderSerializer, QuotationSerializer, SaleSerializer, StorePartInquirySerializer, StoreAccessoryInquirySerializer, TransferSerializer, UserSerializer, RegisterSerializer, StoreSerializer
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeaseMachineSwap, LeasePartInquiry, LeasePayment, LeaseServiceSchedule, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, KeyAudit, Payment, PurchaseOrder, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem, LeasePartInquiryPayment, LeaseAccInquiryPayment
+from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeaseMachineSwapSerializer, LeasePartInquirySerializer, LeasePaymentSerializer, LeaseServiceScheduleSerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, PaymentSerializer, PurchaseOrderSerializer, QuotationSerializer, SaleSerializer, StorePartInquirySerializer, StoreAccessoryInquirySerializer, TransferSerializer, UserSerializer, RegisterSerializer, StoreSerializer, LeasePartInquiryPaymentSerializer, LeaseAccInquiryPaymentSerializer
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.views import APIView
 from django.db.models import Q, Count, Max, Prefetch, Sum
 from django.db import transaction
+from django_filters.rest_framework import DjangoFilterBackend
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 from django.contrib.auth import update_session_auth_hash
@@ -1963,6 +1964,7 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
                 if lease.item:
                     machine = lease.item
                     machine.machine_status = 'Maintenance'
+                    machine. machine_status = 'Used'
                     machine.save()
                 
                 # Return updated lease data
@@ -2020,6 +2022,45 @@ class LeaseContractViewSet(viewsets.ModelViewSet):
                 {'error': f'Failed to reinstate lease: {str(e)}'}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+        
+    @action(detail=True, methods=['post'])
+    def add_payment(self, request, pk=None):
+        lease = self.get_object()
+        serializer = LeasePaymentSerializer(data=request.data)
+        
+        if serializer.is_valid():
+            payment = serializer.save(lease=lease, created_by=request.user)
+            # Update lease payment status
+            lease.amount_paid += payment.amount
+            lease.update_payment_status()
+            
+            return Response(LeasePaymentSerializer(payment).data, status=status.HTTP_201_CREATED)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+class LeasePaymentViewSet(viewsets.ModelViewSet):
+    serializer_class = LeasePaymentSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        queryset = LeasePayment.objects.select_related('lease', 'created_by')
+        lease_id = self.request.query_params.get('lease')
+        if lease_id:
+            queryset = queryset.filter(lease=lease_id)
+        return queryset.order_by('-payment_date', '-created_at')
+    
+    def perform_create(self, serializer):
+        payment = serializer.save(created_by=self.request.user)
+        # Update lease payment status - FIXED: Convert to Decimal properly
+        lease = payment.lease
+        
+        # Convert amount to Decimal to avoid type errors
+        from decimal import Decimal
+        payment_amount_decimal = Decimal(str(payment.amount))
+        
+        lease.amount_paid += payment_amount_decimal
+        lease.update_payment_status()
+        lease.save()
         
 class LeaseServiceScheduleViewSet(viewsets.ModelViewSet):
     serializer_class = LeaseServiceScheduleSerializer
@@ -2734,6 +2775,81 @@ class LeasePartInquiryViewSet(viewsets.ModelViewSet):
             part.save()
             instance.delete()
 
+    @action(detail=True, methods=['get'], url_path='payments')
+    def get_payments(self, request, pk=None):
+        """Get all payments for a specific inquiry"""
+        inquiry = self.get_object()
+        payments = inquiry.payments.all()
+        serializer = LeasePartInquiryPaymentSerializer(payments, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='add_payment')
+    def add_payment(self, request, pk=None):
+        """Add a new payment to an inquiry"""
+        inquiry = self.get_object()
+        
+        with transaction.atomic():
+            # Create payment
+            payment_data = {
+                'inquiry': inquiry.id,
+                'amount': request.data.get('amount'),
+                'payment_method': request.data.get('payment_method', 'Cash'),
+                'reference_number': request.data.get('reference_number', ''),
+                'payment_date': request.data.get('payment_date'),
+                'notes': request.data.get('notes', ''),
+            }
+            
+            payment_serializer = LeasePartInquiryPaymentSerializer(data=payment_data)
+            if payment_serializer.is_valid():
+                payment = payment_serializer.save(created_by=request.user)
+                
+                # Update inquiry payment totals
+                inquiry.amount_paid += Decimal(str(request.data.get('amount')))
+                inquiry.update_payment_status()
+                
+                return Response({
+                    'message': 'Payment recorded successfully',
+                    'payment': payment_serializer.data,
+                    'inquiry': LeasePartInquirySerializer(inquiry).data
+                }, status=status.HTTP_201_CREATED)
+            
+            return Response(payment_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+    @action(detail=True, methods=['delete'], url_path='delete_payment/(?P<payment_id>[^/.]+)')
+    def delete_payment(self, request, pk=None, payment_id=None):
+        """Delete a payment and revert the inquiry amounts"""
+        inquiry = self.get_object()
+        
+        try:
+            with transaction.atomic():
+                # Get the payment
+                payment = LeasePartInquiryPayment.objects.get(id=payment_id, inquiry=inquiry)
+                payment_amount = payment.amount
+                
+                # Delete the payment
+                payment.delete()
+                
+                # Revert inquiry payment totals
+                inquiry.amount_paid -= payment_amount
+                inquiry.amount_paid = max(Decimal('0'), inquiry.amount_paid)  # Ensure non-negative
+                inquiry.update_payment_status()
+                
+                return Response({
+                    'message': 'Payment deleted successfully',
+                    'inquiry': LeasePartInquirySerializer(inquiry).data
+                }, status=status.HTTP_200_OK)
+                
+        except LeasePartInquiryPayment.DoesNotExist:
+            return Response(
+                {'error': 'Payment not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
 class LeaseAccInquiryViewSet(viewsets.ModelViewSet):
     serializer_class = LeaseAccInquirySerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -2825,14 +2941,226 @@ class LeaseAccInquiryViewSet(viewsets.ModelViewSet):
             
             accessory.save()
             instance.delete()
+
+    @action(detail=True, methods=['get'], url_path='payments')
+    def get_payments(self, request, pk=None):
+        """Get all payments for a specific inquiry"""
+        inquiry = self.get_object()
+        payments = inquiry.payments.all()
+        serializer = LeaseAccInquiryPaymentSerializer(payments, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='add_payment')
+    def add_payment(self, request, pk=None):
+        """Add a new payment to an inquiry"""
+        inquiry = self.get_object()
+        
+        with transaction.atomic():
+            # Create payment
+            payment_data = {
+                'inquiry': inquiry.id,
+                'amount': request.data.get('amount'),
+                'payment_method': request.data.get('payment_method', 'Cash'),
+                'reference_number': request.data.get('reference_number', ''),
+                'payment_date': request.data.get('payment_date'),
+                'notes': request.data.get('notes', ''),
+            }
+            
+            payment_serializer = LeaseAccInquiryPaymentSerializer(data=payment_data)
+            if payment_serializer.is_valid():
+                payment = payment_serializer.save(created_by=request.user)
+                
+                # Update inquiry payment totals
+                inquiry.amount_paid += Decimal(str(request.data.get('amount')))
+                inquiry.update_payment_status()
+                
+                return Response({
+                    'message': 'Payment recorded successfully',
+                    'payment': payment_serializer.data,
+                    'inquiry': LeaseAccInquirySerializer(inquiry).data
+                }, status=status.HTTP_201_CREATED)
+            
+            return Response(payment_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=True, methods=['delete'], url_path='delete_payment/(?P<payment_id>[^/.]+)')
+    def delete_payment(self, request, pk=None, payment_id=None):
+        """Delete a payment and revert the inquiry amounts"""
+        inquiry = self.get_object()
+        
+        try:
+            with transaction.atomic():
+                # Get the payment
+                payment = LeaseAccInquiryPayment.objects.get(id=payment_id, inquiry=inquiry)
+                payment_amount = payment.amount
+                
+                # Delete the payment
+                payment.delete()
+                
+                # Revert inquiry payment totals
+                inquiry.amount_paid -= payment_amount
+                inquiry.amount_paid = max(Decimal('0'), inquiry.amount_paid)  # Ensure non-negative
+                inquiry.update_payment_status()
+                
+                return Response({
+                    'message': 'Payment deleted successfully',
+                    'inquiry': LeaseAccInquirySerializer(inquiry).data
+                }, status=status.HTTP_200_OK)
+                
+        except LeaseAccInquiryPayment.DoesNotExist:
+            return Response(
+                {'error': 'Payment not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
     
 class MeterReadingViewSet(viewsets.ModelViewSet):
     queryset = MeterReading.objects.all()
     serializer_class = MeterReadingSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['lease', 'machine']  # Add this line
     search_fields = ['lease__lease_no', 'machine__serial_no']
     ordering_fields = ['month', 'created_at']
+    ordering = ['-month']  # Default ordering
+    
+    def get_queryset(self):
+        """
+        Optionally filter meter readings by lease parameter
+        """
+        queryset = MeterReading.objects.select_related('lease', 'machine')
+        
+        # Filter by lease if provided
+        lease_id = self.request.query_params.get('lease')
+        if lease_id:
+            queryset = queryset.filter(lease_id=lease_id)
+        
+        # Filter by machine if provided
+        machine_id = self.request.query_params.get('machine')
+        if machine_id:
+            queryset = queryset.filter(machine_id=machine_id)
+        
+        return queryset.order_by('-month')
+
+class BillsSummaryView(APIView):
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        client_id = request.query_params.get('client')
+        if not client_id:
+            return Response({'error': 'Client ID required'}, status=400)
+        
+        try:
+            client = Client.objects.get(id=client_id)
+            
+            # Calculate monthly bills unpaid - use Decimal from the start
+            monthly_bills_unpaid = Decimal('0')
+            leases = LeaseContract.objects.filter(client=client, is_active=True)
+            for lease in leases:
+                for reading in lease.meter_readings.all():
+                    bill = lease.calculate_month_bill(reading)
+                    payments = LeasePayment.objects.filter(
+                        meter_reading=reading
+                    ).aggregate(total=models.Sum('amount'))['total'] or Decimal('0')
+                    unpaid = Decimal(str(bill['total_amount'])) - Decimal(str(payments))
+                    if unpaid > 0:
+                        monthly_bills_unpaid += unpaid
+            
+            # Calculate parts and accessories unpaid - ensure Decimal
+            parts_unpaid = LeasePartInquiry.objects.filter(
+                lease__client=client,
+                payment_status__in=['Unpaid', 'Partial', 'Overdue']
+            ).aggregate(total=models.Sum('remaining_balance'))['total'] or Decimal('0')
+            
+            accessories_unpaid = LeaseAccInquiry.objects.filter(
+                lease__client=client,
+                payment_status__in=['Unpaid', 'Partial', 'Overdue']
+            ).aggregate(total=models.Sum('remaining_balance'))['total'] or Decimal('0')
+            
+            # Calculate sales unpaid - ensure Decimal
+            sales_unpaid = Sale.objects.filter(
+                client=client,
+                payment_status__in=['Partial', 'Credit', 'Overdue']
+            ).aggregate(total=models.Sum('remaining_balance'))['total'] or Decimal('0')
+            
+            # MyQ one-off payments - use Decimal
+            myq_unpaid = Decimal('0')
+            for lease in leases:
+                if lease.add_myq and not lease.billed_myq:
+                    myq_payment = lease.myq_payments.first()
+                    if myq_payment and myq_payment.payment_type == 'one_off':
+                        myq_unpaid += Decimal(str(myq_payment.one_off_amount))
+            
+            # Calculate total - all values are now Decimal
+            total_unpaid = (
+                monthly_bills_unpaid + 
+                parts_unpaid + 
+                accessories_unpaid + 
+                sales_unpaid +
+                myq_unpaid
+            )
+            
+            # Convert to float for JSON serialization
+            return Response({
+                'totalUnpaid': float(total_unpaid),
+                'monthlyBillsUnpaid': float(monthly_bills_unpaid),
+                'partsUnpaid': float(parts_unpaid),
+                'accessoriesUnpaid': float(accessories_unpaid),
+                'salesUnpaid': float(sales_unpaid),
+                'myqOneOffUnpaid': float(myq_unpaid)
+            })
+            
+        except Client.DoesNotExist:
+            return Response({'error': 'Client not found'}, status=404)
+
+class UnpaidBillsView(APIView):
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        client_id = request.query_params.get('client')
+        if not client_id:
+            return Response({'error': 'Client ID required'}, status=400)
+        
+        try:
+            client = Client.objects.get(id=client_id)
+            unpaid_bills = []
+            
+            # Monthly bills
+            leases = LeaseContract.objects.filter(client=client, is_active=True)
+            for lease in leases:
+                for reading in lease.meter_readings.all():
+                    bill = lease.calculate_month_bill(reading)
+                    payments = LeasePayment.objects.filter(
+                        meter_reading=reading
+                    ).aggregate(total=models.Sum('amount'))['total'] or 0
+                    unpaid = bill['total_amount'] - payments
+                    
+                    if unpaid > 0:
+                        unpaid_bills.append({
+                            'id': f"monthly_{reading.id}",
+                            'type': 'monthly',
+                            'description': f"{lease.lease_no} - {reading.month.strftime('%B %Y')}",
+                            'originalAmount': bill['total_amount'],
+                            'remainingAmount': unpaid
+                        })
+            
+            # Add similar logic for parts, accessories, sales, and MyQ
+            
+            return Response(unpaid_bills)
+            
+        except Client.DoesNotExist:
+            return Response({'error': 'Client not found'}, status=404)
+
+class PaymentAllocationView(APIView):
+    permission_classes = [IsAuthenticated]
+    
+    @transaction.atomic
+    def post(self, request):
+        # Handle payment allocation across different bill types
+        pass
 
 class QuotationViewSet(viewsets.ModelViewSet):
     queryset = Quotation.objects.all()

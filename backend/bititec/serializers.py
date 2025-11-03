@@ -1,7 +1,7 @@
 from decimal import Decimal
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeaseMachineSwap, LeasePartInquiry, LeaseServiceSchedule, MachineType, Machine, MeterReading, PartType, Part, Payment, PurchaseOrder, PurchaseOrderItem, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseAccInquiryPayment, LeaseContract, LeaseMachineSwap, LeasePartInquiry, LeasePartInquiryPayment, LeasePayment, LeaseServiceSchedule, MachineType, Machine, MeterReading, MyQPayment, PartType, Part, Payment, PurchaseOrder, PurchaseOrderItem, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem
 from django.db.models import Sum
 from dateutil.relativedelta import relativedelta
 from django.utils import timezone
@@ -381,6 +381,34 @@ class LeaseMachineSwapSerializer(serializers.ModelSerializer):
         validated_data['swapped_by'] = self.context['request'].user
         return super().create(validated_data)
     
+class LeasePaymentSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    amount = serializers.FloatField()  
+    
+    class Meta:
+        model = LeasePayment
+        fields = [
+            'id', 'lease', 'amount', 'payment_method', 'reference_number',
+            'payment_date', 'notes', 'created_at', 'created_by', 'created_by_name'
+        ]
+        read_only_fields = ['created_at', 'created_by']
+    
+    def to_representation(self, instance):
+        """Override to ensure amount is returned as float"""
+        representation = super().to_representation(instance)
+        if representation.get('amount') is not None:
+            representation['amount'] = float(representation['amount'])
+        return representation
+    
+class MyQPaymentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MyQPayment
+        fields = [
+            'id', 'lease', 'payment_type', 'one_off_amount', 
+            'color_rate', 'monochrome_rate', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+    
 class LeaseContractSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source='client.client_name', read_only=True)
     client_location = serializers.CharField(source='client.client_location', read_only=True)
@@ -405,6 +433,7 @@ class LeaseContractSerializer(serializers.ModelSerializer):
     client = ClientSerializer(read_only=True)
     meter_readings = MeterReadingSerializer(many=True, read_only=True)
     missing_readings = serializers.SerializerMethodField()
+    
     # Account handler serializer fields
     account_handler = UserSerializer(read_only=True)
     account_handler_id = serializers.PrimaryKeyRelatedField(
@@ -430,6 +459,22 @@ class LeaseContractSerializer(serializers.ModelSerializer):
     )
     machine_swaps = LeaseMachineSwapSerializer(many=True, read_only=True)
     
+    # Payment fields - use FloatField for frontend compatibility
+    payments = LeasePaymentSerializer(many=True, read_only=True)
+    payments_count = serializers.IntegerField(source='payments.count', read_only=True)
+    myq_payments = MyQPaymentSerializer(many=True, read_only=True)
+    myq_payment_data = serializers.JSONField(
+        write_only=True, 
+        required=False,
+        default=None  # or default=dict
+    )
+
+    monochrome_rate = serializers.FloatField(default=1.50)
+    color_rate = serializers.FloatField(default=4.50)
+    amount_paid = serializers.FloatField(default=0)
+    remaining_balance = serializers.FloatField(default=0)
+    total_billed = serializers.SerializerMethodField()
+    
     class Meta:
         model = LeaseContract
         fields = [
@@ -439,7 +484,10 @@ class LeaseContractSerializer(serializers.ModelSerializer):
             'billed_myq', 'is_active', 'contract_type', 'lease_no', 'created_at', 'client', 
             'meter_readings', 'missing_readings', 'technician', 'technician_id',
             'account_handler', 'account_handler_id', 'account_handler_name', 'account_handler_email',
-            'machine_swaps'
+            'machine_swaps', 'myq_payments', 'myq_payment_data',
+            'monochrome_rate', 'color_rate', 'amount_paid', 'remaining_balance',
+            'payment_status', 'payment_notes', 'payments', 'payments_count', 'total_billed',
+            'initial_mono_counter', 'initial_color_counter', 
         ]
         extra_kwargs = {
             'created_at': {'read_only': True},
@@ -451,6 +499,67 @@ class LeaseContractSerializer(serializers.ModelSerializer):
             'store': {'required': False},
         }
     
+    def get_total_amount(self, obj):
+        return float(obj.calculate_total_amount())
+
+    def get_missing_readings(self, obj):
+        months_missing = []
+        current_date = timezone.now().date()
+        start_date = obj.from_date
+        
+        while start_date <= current_date:
+            if not obj.meter_readings.filter(month__month=start_date.month, 
+                                           month__year=start_date.year).exists():
+                months_missing.append(start_date.strftime('%Y-%m'))
+            start_date += relativedelta(months=1)
+            
+        return months_missing
+
+    def to_representation(self, instance):
+        """Override to ensure decimal fields are returned as floats"""
+        representation = super().to_representation(instance)
+        
+        # Convert decimal fields to floats for frontend compatibility
+        decimal_fields = ['monthly_rate', 'amount_paid', 'remaining_balance', 'initial_payment']
+        for field in decimal_fields:
+            if field in representation and representation[field] is not None:
+                representation[field] = float(representation[field])
+        
+        return representation
+    
+    def get_total_billed(self, obj):
+        """Calculate total amount billed across all meter readings"""
+        total = 0
+        for reading in obj.meter_readings.all():
+            bill = obj.calculate_month_bill(reading)
+            total += bill['total_amount']
+        
+        # Add one-off MyQ if not yet paid
+        if obj.add_myq and not obj.billed_myq:
+            myq_payment = obj.myq_payments.first()
+            if myq_payment and myq_payment.payment_type == 'one_off':
+                total += float(myq_payment.one_off_amount)
+        
+        return float(total)
+    
+    def create(self, validated_data):
+        myq_payment_data = validated_data.pop('myq_payment_data', None)
+        
+        with transaction.atomic():
+            lease = super().create(validated_data)
+            
+            # Create MyQ payment record if MyQ is enabled
+            if lease.add_myq and myq_payment_data:
+                MyQPayment.objects.create(
+                    lease=lease,
+                    payment_type=myq_payment_data.get('payment_type', 'subscription'),
+                    one_off_amount=myq_payment_data.get('one_off_amount', 0),
+                    color_rate=myq_payment_data.get('color_rate', 0),
+                    monochrome_rate=myq_payment_data.get('monochrome_rate', 0)
+                )
+            
+            return lease
+        
     def update(self, instance, validated_data):
         # Track if machine is changing
         original_machine = instance.item
@@ -487,19 +596,35 @@ class LeaseContractSerializer(serializers.ModelSerializer):
             instance.save()
             
             return instance
-
-    def get_missing_readings(self, obj):
-        months_missing = []
-        current_date = timezone.now().date()
-        start_date = obj.from_date
         
-        while start_date <= current_date:
-            if not obj.meter_readings.filter(month__month=start_date.month, 
-                                           month__year=start_date.year).exists():
-                months_missing.append(start_date.strftime('%Y-%m'))
-            start_date += relativedelta(months=1)
+    def update(self, instance, validated_data):
+        myq_payment_data = validated_data.pop('myq_payment_data', None)
+        
+        with transaction.atomic():
+            lease = super().update(instance, validated_data)
             
-        return months_missing
+            # Update or create MyQ payment
+            if lease.add_myq and myq_payment_data:
+                myq_payment, created = MyQPayment.objects.get_or_create(
+                    lease=lease,
+                    defaults={
+                        'payment_type': myq_payment_data.get('payment_type', 'subscription'),
+                        'one_off_amount': myq_payment_data.get('one_off_amount', 0),
+                        'color_rate': myq_payment_data.get('color_rate', 0),
+                        'monochrome_rate': myq_payment_data.get('monochrome_rate', 0)
+                    }
+                )
+                if not created:
+                    myq_payment.payment_type = myq_payment_data.get('payment_type', myq_payment.payment_type)
+                    myq_payment.one_off_amount = myq_payment_data.get('one_off_amount', myq_payment.one_off_amount)
+                    myq_payment.color_rate = myq_payment_data.get('color_rate', myq_payment.color_rate)
+                    myq_payment.monochrome_rate = myq_payment_data.get('monochrome_rate', myq_payment.monochrome_rate)
+                    myq_payment.save()
+            elif not lease.add_myq:
+                # Remove MyQ payment if MyQ is disabled
+                MyQPayment.objects.filter(lease=lease).delete()
+            
+            return lease
     
 class LeaseServiceScheduleSerializer(serializers.ModelSerializer):
     lease_no = serializers.CharField(source='lease.lease_no', read_only=True)
@@ -525,11 +650,23 @@ class LeaseServiceScheduleSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['created_at']
 
+class LeasePartInquiryPaymentSerializer(serializers.ModelSerializer):
+    created_by = UserSerializer(read_only=True)
+    
+    class Meta:
+        model = LeasePartInquiryPayment
+        fields = [
+            'id', 'inquiry', 'amount', 'payment_method', 
+            'reference_number', 'payment_date', 'notes', 
+            'created_by', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at', 'created_by']
+
 class LeasePartInquirySerializer(serializers.ModelSerializer):
     part = BasicPartSerializer(read_only=True)
     lease = LeaseContractSerializer(read_only=True)
     part_id = serializers.PrimaryKeyRelatedField(queryset=Part.objects.all(), write_only=True, source='part')
-    lease_id = serializers.PrimaryKeyRelatedField(  # Add this
+    lease_id = serializers.PrimaryKeyRelatedField(
         queryset=LeaseContract.objects.all(),
         write_only=True,
         source='lease'
@@ -540,6 +677,8 @@ class LeasePartInquirySerializer(serializers.ModelSerializer):
         source='store_part_inquiry',
         required=False,
     )
+    payments = LeasePartInquiryPaymentSerializer(many=True, read_only=True)
+    payments_count = serializers.SerializerMethodField()
 
     subtotal = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     vat_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
@@ -556,9 +695,17 @@ class LeasePartInquirySerializer(serializers.ModelSerializer):
             'id', 'lease', 'part', 'quantity', 'unit_amount', 'subtotal',
             'vat_rate', 'vat_amount', 'total_amount', 'apply_vat', 'date', 
             'is_paid', 'created_at', 'updated_at', 'part_id', 'lease_id', 
-            'store_part_inquiry_id'
+            'store_part_inquiry_id', 'payment_type', 'initial_payment',
+            'amount_paid', 'remaining_balance', 'payment_status', 
+            'due_date', 'payment_notes', 'payments', 'payments_count'
         ]
-        read_only_fields = ['created_at', 'updated_at', 'subtotal', 'vat_amount', 'total_amount']
+        read_only_fields = [
+            'created_at', 'updated_at', 'subtotal', 'vat_amount', 
+            'total_amount', 'amount_paid', 'remaining_balance', 'payment_status'
+        ]
+    
+    def get_payments_count(self, obj):
+        return obj.payments.count()
 
 class PartSerializer(serializers.ModelSerializer):
     store_name = serializers.CharField(source='store.storeName', read_only=True)
@@ -867,7 +1014,7 @@ class CallSerializer(serializers.ModelSerializer):
             'id', 'technician', 'technician_ids', 'contract_type', 'service_type',
             'client', 'client_id', 'client_name', 'client_name_display', 
             'client_location', 'client_location_display',
-            'reported_by', 'reported_date', 
+            'reported_by', 'reported_date', 'color_meter_reading', 'mono_meter_reading',
             'item', 'item_id', 'item_name', 'serial_no', 'store_name',
             'fault_reported', 'action_taken', 'meter_reading', 'parts_required', 'parts_used',
             'comments', 'status', 'department', 'is_checked', 'director_comment', 'ticket_no',
@@ -1045,15 +1192,43 @@ class CallSerializer(serializers.ModelSerializer):
 class StorePartInquirySerializer(serializers.ModelSerializer):
     requested_by = UserSerializer(read_only=True)
     lease_part_inquiries = LeasePartInquirySerializer(many=True, read_only=True)
+    lease = LeaseContractSerializer(read_only=True)
+    lease_id = serializers.PrimaryKeyRelatedField(
+        queryset=LeaseContract.objects.all(),
+        write_only=True,
+        source='lease',
+        required=False,
+        allow_null=True
+    )
     
     class Meta:
         model = StorePartInquiry
         fields = [
             'id', 'service_call', 'part_name', 'quantity', 'requested_by', 
             'requested_at', 'unit_price', 'add_vat', 'is_issued', 'issued_by', 
-            'status', 'notes', 'lease_part_inquiries'
+            'status', 'notes', 'lease_part_inquiries', 'lease', 'lease_id'
         ]
         read_only_fields = ['requested_at', 'issued_by', 'status']
+
+    def create(self, validated_data):
+        # Auto-populate lease if not provided
+        if not validated_data.get('lease'):
+            service_call = validated_data.get('service_call')
+            if service_call:
+                # Check if service call has a lease
+                if service_call.lease:
+                    validated_data['lease'] = service_call.lease
+                # Otherwise, if it's a Lease contract with a machine, find the active lease
+                elif service_call.contract_type == 'Lease' and service_call.item:
+                    from .models import LeaseContract
+                    active_lease = LeaseContract.objects.filter(
+                        item=service_call.item,
+                        is_active=True
+                    ).first()
+                    if active_lease:
+                        validated_data['lease'] = active_lease
+        
+        return super().create(validated_data)
 
     def update(self, instance, validated_data):
         # Handle status update based on is_issued
@@ -1073,13 +1248,21 @@ class StorePartInquirySerializer(serializers.ModelSerializer):
 class StoreAccessoryInquirySerializer(serializers.ModelSerializer):
     requested_by = UserSerializer(read_only=True)
     lease_acc_inquiries = LeaseAccInquirySerializer(many=True, read_only=True)
+    lease = LeaseContractSerializer(read_only=True)
+    lease_id = serializers.PrimaryKeyRelatedField(
+        queryset=LeaseContract.objects.all(),
+        write_only=True,
+        source='lease',
+        required=False,
+        allow_null=True
+    )
     
     class Meta:
         model = StoreAccessoryInquiry  
         fields = [
             'id', 'service_call', 'acc_name', 'quantity', 'requested_by', 
             'requested_at', 'unit_price', 'add_vat', 'is_issued', 'issued_by', 
-            'status', 'notes', 'lease_acc_inquiries'  
+            'status', 'notes', 'lease_acc_inquiries', 'lease', 'lease_id'  
         ]
         read_only_fields = ['requested_at', 'issued_by', 'status']
 
@@ -1485,6 +1668,18 @@ class ChatGroupSerializer(serializers.ModelSerializer):
                 'created_at': last_message.created_at.isoformat(),
             }
         return None
+    
+class LeaseAccInquiryPaymentSerializer(serializers.ModelSerializer):
+    created_by = UserSerializer(read_only=True)
+    
+    class Meta:
+        model = LeaseAccInquiryPayment
+        fields = [
+            'id', 'inquiry', 'amount', 'payment_method', 
+            'reference_number', 'payment_date', 'notes', 
+            'created_by', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at', 'created_by']
 
 class LeaseAccInquirySerializer(serializers.ModelSerializer):
     accessory = BasicAccessorySerializer(read_only=True)
@@ -1501,6 +1696,8 @@ class LeaseAccInquirySerializer(serializers.ModelSerializer):
         source='store_acc_inquiry',
         required=False,
     )
+    payments = LeaseAccInquiryPaymentSerializer(many=True, read_only=True)
+    payments_count = serializers.SerializerMethodField()
 
     subtotal = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     vat_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
@@ -1512,9 +1709,17 @@ class LeaseAccInquirySerializer(serializers.ModelSerializer):
             'id', 'lease', 'accessory', 'quantity', 'unit_amount', 'subtotal',
             'vat_rate', 'vat_amount', 'total_amount', 'apply_vat', 'date', 
             'is_paid', 'created_at', 'updated_at', 'accessory_id', 'lease_id', 
-            'store_acc_inquiry_id'
+            'store_acc_inquiry_id', 'payment_type', 'initial_payment',
+            'amount_paid', 'remaining_balance', 'payment_status', 
+            'due_date', 'payment_notes', 'payments', 'payments_count'
         ]
-        read_only_fields = ['created_at', 'updated_at', 'subtotal', 'vat_amount', 'total_amount']
+        read_only_fields = [
+            'created_at', 'updated_at', 'subtotal', 'vat_amount', 
+            'total_amount', 'amount_paid', 'remaining_balance', 'payment_status'
+        ]
+    
+    def get_payments_count(self, obj):
+        return obj.payments.count()
 
 class QuotationItemSerializer(serializers.ModelSerializer):
     class Meta:
