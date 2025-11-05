@@ -275,16 +275,22 @@ class MachineSerializer(serializers.ModelSerializer):
     source_transfer = serializers.PrimaryKeyRelatedField(read_only=True)
     donated_parts = serializers.SerializerMethodField()
     installed_parts = serializers.SerializerMethodField()
+    qr_code_url = serializers.SerializerMethodField()
     
     class Meta:
         model = Machine
         fields = [
             'id', 'machine_name', 'machine_brand', 'machine_type', 'serial_no', 'unit_value',
             'quantity', 'condition_description', 'created_at', 'machine_condition', 'color_type',
-            'store',  'store_id', 'store_name', 'supplier_name', 'machine_status', 'is_transfer', 'source_transfer', 'donated_parts', 'installed_parts'  
+            'store',  'store_id', 'store_name', 'supplier_name', 'machine_status', 'is_transfer', 
+            'source_transfer', 'donated_parts', 'installed_parts', 'qr_code', 'qr_code_url', 
+            'auto_generated_serial'
         ]
         extra_kwargs = {
-            'created_at': {'read_only': True}
+            'created_at': {'read_only': True},
+            'qr_code': {'read_only': True},
+            'auto_generated_serial': {'read_only': True},
+            'serial_no': {'required': False}
         }
 
     def validate(self, data):
@@ -301,6 +307,15 @@ class MachineSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         instance.save()
         return instance
+    
+    def get_qr_code_url(self, obj):
+        """Get full URL for QR code image"""
+        if obj.qr_code:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.qr_code.url)
+            return obj.qr_code.url
+        return None
     
     def get_donated_parts(self, obj):
         parts = Part.objects.filter(origin_machine=obj)
@@ -744,6 +759,7 @@ class PartSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True
     )
+    qr_code_url = serializers.SerializerMethodField()
     
     class Meta:
         model = Part
@@ -751,11 +767,15 @@ class PartSerializer(serializers.ModelSerializer):
             'id', 'part_name', 'part_brand', 'part_type', 'ref_no', 'unit_value', 'intial_quantity', 'quantity', 'condition_description', 
             'created_at', 'part_condition', 'color_type', 'store', 'store_id', 'store_name', 'supplier_name', 'part_status', 'is_transfer', 
             'leased_quantity', 'sold_quantity', 'transferred_quantity', 'received_quantity', 'transfer_history', 'lease_inquiries', 'sold_items', 
-            'source_transfer', 'origin_machine', 'current_machine', 'origin_machine_id', 'current_machine_id', 'removed_date', 'installed_date', 'store_location', 
+            'source_transfer', 'origin_machine', 'current_machine', 'origin_machine_id', 'current_machine_id', 'removed_date', 'installed_date', 
+            'store_location', 'qr_code', 'qr_code_url', 'auto_generated_ref'
         ]
         extra_kwargs = {
             'store': {'write_only': True},
-            'created_at': {'read_only': True}
+            'created_at': {'read_only': True},
+            'qr_code': {'read_only': True},
+            'auto_generated_ref': {'read_only': True},
+            'ref_no': {'required': False}
         }
 
     def validate_serial_no(self, value):
@@ -800,6 +820,15 @@ class PartSerializer(serializers.ModelSerializer):
                 } if item.sale else None  # Handle case where sale is None (though unlikely)
             }
         } for item in sale_items if item.sale]
+    
+    def get_qr_code_url(self, obj):
+        """Get full URL for QR code image"""
+        if obj.qr_code:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.qr_code.url)
+            return obj.qr_code.url
+        return None
     
     def get_origin_machine(self, obj):
         if obj.origin_machine:
@@ -860,6 +889,7 @@ class AccessorySerializer(serializers.ModelSerializer):
     transferred_quantity = serializers.ReadOnlyField()
     received_quantity = serializers.ReadOnlyField()
     transfer_history = serializers.ReadOnlyField()
+    qr_code_url = serializers.SerializerMethodField()
 
 
     class Meta:
@@ -886,13 +916,17 @@ class AccessorySerializer(serializers.ModelSerializer):
             'leased_quantity', 
             'sold_quantity',
             'lease_inquiries', 
-             'transferred_quantity', 'received_quantity', 'transfer_history',
+            'transferred_quantity', 'received_quantity', 'transfer_history',
             'sold_items',
-            'source_transfer'
+            'source_transfer',
+            'qr_code', 'qr_code_url', 'auto_generated_ref'
         ]
         extra_kwargs = {
             'store': {'write_only': True},
-            'created_at': {'read_only': True}
+            'created_at': {'read_only': True},
+            'qr_code': {'read_only': True},
+            'auto_generated_ref': {'read_only': True},
+            'ref_no': {'required': False}
         }
 
     def validate_serial_no(self, value):
@@ -910,6 +944,15 @@ class AccessorySerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         instance.save()
         return instance
+    
+    def get_qr_code_url(self, obj):
+        """Get full URL for QR code image"""
+        if obj.qr_code:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.qr_code.url)
+            return obj.qr_code.url
+        return None
     
     def get_leased_quantity(self, obj):
         return obj.leaseaccinquiry_set.aggregate(
@@ -1976,4 +2019,3 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
                 item.delete()
         
         return instance
-    

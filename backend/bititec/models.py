@@ -530,7 +530,7 @@ class Machine(models.Model):
     machine_name = models.CharField(max_length=255)
     machine_brand = models.CharField(max_length=255)
     machine_type = models.CharField(max_length=255)
-    serial_no = models.CharField(max_length=255, unique=True)
+    serial_no = models.CharField(max_length=255, unique=True, blank=True)
     unit_value = models.PositiveIntegerField()
     quantity = models.PositiveIntegerField()
     condition_description = models.JSONField(default=list)
@@ -542,6 +542,8 @@ class Machine(models.Model):
     machine_status = models.CharField(max_length=20, choices=MACHINE_STATUS_CHOICES)
     is_transfer = models.BooleanField(default=False)
     source_transfer = models.ForeignKey('Transfer', on_delete=models.SET_NULL, null=True, blank=True, related_name='transferred_machines')
+    qr_code = models.ImageField(upload_to='qr_codes/machines/', blank=True, null=True)
+    auto_generated_serial = models.BooleanField(default=False, help_text='Whether serial number was auto-generated')
 
     def __str__(self):
         return f"{self.machine_name} - {self.serial_no}"
@@ -553,6 +555,34 @@ class Machine(models.Model):
     @property
     def store_id(self):
         return str(self.store.id)
+
+    def save(self, *args, **kwargs):
+        from .utils import generate_unique_serial, generate_qr_code
+        
+        # Auto-generate serial number if not provided
+        if not self.serial_no:
+            self.serial_no = generate_unique_serial(
+                prefix='M-',
+                length=8,
+                model_class=Machine,
+                field_name='serial_no'
+            )
+            self.auto_generated_serial = True
+        
+        # Save the instance first
+        super().save(*args, **kwargs)
+        
+        # Generate QR code if it doesn't exist
+        if self.serial_no and not self.qr_code:
+            try:
+                qr_path = generate_qr_code(self.serial_no, f'machine_{self.id}')
+                self.qr_code = qr_path
+                # Update only qr_code field to avoid recursion
+                Machine.objects.filter(pk=self.pk).update(qr_code=qr_path)
+            except Exception as e:
+                # Log error but don't fail the save
+                import logging
+                logging.error(f"Failed to generate QR code for machine {self.id}: {e}")
 
     class Meta:
         ordering = ['-created_at']
@@ -575,7 +605,7 @@ class Part(models.Model):
     part_name = models.CharField(max_length=255)  
     part_brand = models.CharField(max_length=255)  
     part_type = models.CharField(max_length=255)  
-    ref_no = models.CharField(max_length=255, unique=True)  
+    ref_no = models.CharField(max_length=255, unique=True, blank=True)  
     unit_value = models.PositiveIntegerField()
     intial_quantity = models.PositiveIntegerField()
     quantity = models.PositiveIntegerField()
@@ -606,9 +636,39 @@ class Part(models.Model):
     )
     removed_date = models.DateField(null=True, blank=True)
     installed_date = models.DateField(null=True, blank=True)
+    qr_code = models.ImageField(upload_to='qr_codes/parts/', blank=True, null=True)
+    auto_generated_ref = models.BooleanField(default=False, help_text='Whether reference number was auto-generated')
 
     def __str__(self):
         return f"{self.part_name} - {self.ref_no}"
+    
+    def save(self, *args, **kwargs):
+        from .utils import generate_unique_ref, generate_qr_code
+        
+        # Auto-generate ref number if not provided
+        if not self.ref_no:
+            self.ref_no = generate_unique_ref(
+                prefix='P-',
+                length=8,
+                model_class=Part,
+                field_name='ref_no'
+            )
+            self.auto_generated_ref = True
+        
+        # Save the instance first
+        super().save(*args, **kwargs)
+        
+        # Generate QR code if it doesn't exist
+        if self.ref_no and not self.qr_code:
+            try:
+                qr_path = generate_qr_code(self.ref_no, f'part_{self.id}')
+                self.qr_code = qr_path
+                # Update only qr_code field to avoid recursion
+                Part.objects.filter(pk=self.pk).update(qr_code=qr_path)
+            except Exception as e:
+                # Log error but don't fail the save
+                import logging
+                logging.error(f"Failed to generate QR code for part {self.id}: {e}")
 
     @property
     def store_name(self):
@@ -746,7 +806,7 @@ class Accessory(models.Model):
     acc_name = models.CharField(max_length=255)
     acc_brand = models.CharField(max_length=255)
     acc_type = models.CharField(max_length=255)
-    ref_no = models.CharField(max_length=255, unique=True)
+    ref_no = models.CharField(max_length=255, unique=True, blank=True)
     unit_value = models.PositiveIntegerField()
     intial_quantity = models.PositiveIntegerField()
     quantity = models.PositiveIntegerField()
@@ -759,9 +819,39 @@ class Accessory(models.Model):
     acc_status = models.CharField(max_length=20, choices=ACCESSORY_STATUS_CHOICES)
     is_transfer = models.BooleanField(default=False)
     source_transfer = models.ForeignKey('Transfer', on_delete=models.SET_NULL, null=True, blank=True, related_name='transferred_accessories')
+    qr_code = models.ImageField(upload_to='qr_codes/accessories/', blank=True, null=True)
+    auto_generated_ref = models.BooleanField(default=False, help_text='Whether reference number was auto-generated')
 
     def __str__(self):
         return f"{self.acc_name} - {self.ref_no}"
+    
+    def save(self, *args, **kwargs):
+        from .utils import generate_unique_ref, generate_qr_code
+        
+        # Auto-generate ref number if not provided
+        if not self.ref_no:
+            self.ref_no = generate_unique_ref(
+                prefix='A-',
+                length=8,
+                model_class=Accessory,
+                field_name='ref_no'
+            )
+            self.auto_generated_ref = True
+        
+        # Save the instance first
+        super().save(*args, **kwargs)
+        
+        # Generate QR code if it doesn't exist
+        if self.ref_no and not self.qr_code:
+            try:
+                qr_path = generate_qr_code(self.ref_no, f'accessory_{self.id}')
+                self.qr_code = qr_path
+                # Update only qr_code field to avoid recursion
+                Accessory.objects.filter(pk=self.pk).update(qr_code=qr_path)
+            except Exception as e:
+                # Log error but don't fail the save
+                import logging
+                logging.error(f"Failed to generate QR code for accessory {self.id}: {e}")
 
     @property
     def store_name(self):
@@ -2333,4 +2423,3 @@ class PurchaseOrderItem(models.Model):
     def save(self, *args, **kwargs):
         self.total_price = self.quantity * self.unit_price
         super().save(*args, **kwargs)
-
