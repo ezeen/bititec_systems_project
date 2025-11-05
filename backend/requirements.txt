@@ -16,4 +16,5 @@ python-dateutil
 Pillow
 xhtml2pdf
 PyJWT
+qrcode
 django-csp
