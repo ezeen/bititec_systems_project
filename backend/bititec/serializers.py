@@ -1,11 +1,14 @@
 from decimal import Decimal
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseAccInquiryPayment, LeaseContract, LeaseMachineSwap, LeasePartInquiry, LeasePartInquiryPayment, LeasePayment, LeaseServiceSchedule, MachineType, Machine, MeterReading, MyQPayment, PartType, Part, Payment, PurchaseOrder, PurchaseOrderItem, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem
+
+from .utils import regenerate_qr_code
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, Device, LeaseAccInquiry, LeaseAccInquiryPayment, LeaseContract, LeaseMachineSwap, LeasePartInquiry, LeasePartInquiryPayment, LeasePayment, LeaseServiceSchedule, MachineType, Machine, MeterReading, MyQPayment, PartType, Part, Payment, PurchaseOrder, PurchaseOrderItem, Quotation, QuotationItem, Sale, SaleItem, Store, Call, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem
 from django.db.models import Sum
 from dateutil.relativedelta import relativedelta
 from django.utils import timezone
 from django.db import transaction
+from django.core.files.storage import default_storage
 
 class StoreSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(read_only=True)
@@ -206,6 +209,25 @@ class EnhancedUserSerializer(serializers.ModelSerializer):
             'locked_until', 'last_failed_login', 'keys', 
             'all_permissions', 'key_audit'
         ]
+
+class DeviceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Device
+        fields = ['push_token', 'device_type', 'device_name']
+    
+    def create(self, validated_data):
+        user = self.context['request'].user
+        # Update or create to handle token refreshes
+        device, created = Device.objects.update_or_create(
+            push_token=validated_data['push_token'],
+            defaults={
+                'user': user,
+                'device_type': validated_data['device_type'],
+                'device_name': validated_data.get('device_name', ''),
+                'active': True
+            }
+        )
+        return device
     
 class BaseTypeSerializer(serializers.ModelSerializer):
     image1_url = serializers.SerializerMethodField()
@@ -293,19 +315,52 @@ class MachineSerializer(serializers.ModelSerializer):
             'serial_no': {'required': False}
         }
 
+    def create(self, validated_data):
+        return Machine.objects.create(**validated_data)
+
     def validate(self, data):
         # Only require store during creation
         if self.instance is None and 'store' not in data:
             raise serializers.ValidationError({"store": "This field is required."})
         return data
-
-    def create(self, validated_data):
-        return Machine.objects.create(**validated_data)
+    
+    def validate_serial_no(self, value):
+        """Validate that serial number is unique (excluding current instance)"""
+        if self.instance and self.instance.serial_no == value:
+            return value
+        if Machine.objects.filter(serial_no=value).exists():
+            raise serializers.ValidationError("A machine with this serial number already exists.")
+        return value
 
     def update(self, instance, validated_data):
+        # Check if serial/ref number is being changed
+        ref_changed = False
+        new_ref = validated_data.get('serial_no')
+        
+        if new_ref and new_ref != instance.serial_no:
+            ref_changed = True
+        
+        # Update all fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+        
+        # Save the instance
         instance.save()
+        
+        # Regenerate QR code if serial/ref number changed
+        if ref_changed:
+            # Delete old QR code
+            if instance.qr_code and default_storage.exists(instance.qr_code.name):
+                default_storage.delete(instance.qr_code.name)
+            
+            # Generate new QR code
+            regenerate_qr_code(
+                instance=instance,
+                data_field='serial_no', 
+                qr_field='qr_code',
+                prefix=f'machine_{instance.id}'
+            )
+        
         return instance
     
     def get_qr_code_url(self, obj):
@@ -778,10 +833,10 @@ class PartSerializer(serializers.ModelSerializer):
             'ref_no': {'required': False}
         }
 
-    def validate_serial_no(self, value):
+    def validate_ref_no(self, value):
         if self.instance and self.instance.ref_no == value:
             return value
-        if Part.objects.filter(serial_no=value).exists():
+        if Part.objects.filter(ref_no=value).exists():
             raise serializers.ValidationError("A part with this reference number already exists.")
         return value
 
@@ -789,9 +844,34 @@ class PartSerializer(serializers.ModelSerializer):
         return Part.objects.create(**validated_data)
 
     def update(self, instance, validated_data):
+        # Check if ref number is being changed
+        ref_changed = False
+        new_ref = validated_data.get('ref_no')  
+        
+        if new_ref and new_ref != instance.ref_no:
+            ref_changed = True
+        
+        # Update all fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+        
+        # Save the instance
         instance.save()
+        
+        # Regenerate QR code if ref number changed
+        if ref_changed:
+            # Delete old QR code
+            if instance.qr_code and default_storage.exists(instance.qr_code.name):
+                default_storage.delete(instance.qr_code.name)
+            
+            # Generate new QR code
+            regenerate_qr_code(
+                instance=instance,
+                data_field='ref_no',  
+                qr_field='qr_code',
+                prefix=f'machine_{instance.id}'
+            )
+        
         return instance
     
     def get_leased_quantity(self, obj):
@@ -932,7 +1012,7 @@ class AccessorySerializer(serializers.ModelSerializer):
     def validate_serial_no(self, value):
         if self.instance and self.instance.ref_no == value:
             return value
-        if Accessory.objects.filter(serial_no=value).exists():
+        if Accessory.objects.filter(ref_no=value).exists():
             raise serializers.ValidationError("An accessory with this reference number already exists.")
         return value
 
@@ -940,9 +1020,34 @@ class AccessorySerializer(serializers.ModelSerializer):
         return Accessory.objects.create(**validated_data)
 
     def update(self, instance, validated_data):
+        # Check if ref number is being changed
+        ref_changed = False
+        new_ref = validated_data.get('ref_no')  
+        
+        if new_ref and new_ref != instance.ref_no:
+            ref_changed = True
+        
+        # Update all fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+        
+        # Save the instance
         instance.save()
+        
+        # Regenerate QR code if ref number changed
+        if ref_changed:
+            # Delete old QR code
+            if instance.qr_code and default_storage.exists(instance.qr_code.name):
+                default_storage.delete(instance.qr_code.name)
+            
+            # Generate new QR code
+            regenerate_qr_code(
+                instance=instance,
+                data_field='ref_no',  
+                qr_field='qr_code',
+                prefix=f'machine_{instance.id}'
+            )
+        
         return instance
     
     def get_qr_code_url(self, obj):
@@ -1097,6 +1202,16 @@ class CallSerializer(serializers.ModelSerializer):
             call.status = 'Open'
         
         call.save()
+
+        # Send notifications if technicians are assigned
+        if technicians:
+            
+            technician_ids = [tech.id for tech in technicians]
+            
+            # PUSH NOTIFICATIONS HERE
+            from .notifications import send_service_call_notification
+            send_service_call_notification(call, technician_ids)
+
         return call
     
     def update(self, instance, validated_data):
@@ -1133,8 +1248,24 @@ class CallSerializer(serializers.ModelSerializer):
             # Check if both approvals are now True and update status
             if instance.client_verification and instance.technician_manager_approval:
                 instance.status = 'Closed'
+
+        old_technicians = set(instance.technician.all())
         
         instance.save()
+
+        # Send notification to newly assigned technicians
+        if technicians is not None:
+            new_technicians = set(technicians)
+            newly_assigned = new_technicians - old_technicians
+            
+            if newly_assigned:
+                
+                technician_ids = [tech.id for tech in newly_assigned]
+                
+                # PUSH NOTIFICATIONS HERE
+                from .notifications import send_service_call_notification
+                send_service_call_notification(instance, technician_ids)
+
         return instance
 
     def to_internal_value(self, data):

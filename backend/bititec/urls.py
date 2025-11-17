@@ -20,6 +20,8 @@ urlpatterns = [
     path('grant_key_access/', views.grant_key_access, name='grant_key_access'),
     path('revoke_key_access/', views.revoke_key_access, name='revoke_key_access'),
     path('permission-audit/<uuid:user_id>/', views.get_key_audit, name='get_key_audit'),
+    path('devices/', views.DeviceViewSet.as_view({'get': 'list', 'post': 'create'})),
+    path('devices/<int:pk>/', views.DeviceViewSet.as_view({'get': 'retrieve', 'delete': 'destroy'})),
     path('stores/', views.StoreListCreate.as_view()),
     path('stores/<uuid:id>/', views.StoreRetrieveUpdateDestroy.as_view()),
     path('user-stores/', views.UserStoreListView.as_view(), name='user-stores'),

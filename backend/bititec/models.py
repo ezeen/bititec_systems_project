@@ -447,6 +447,26 @@ class SecurityEvent(models.Model):
     class Meta:
         ordering = ['-timestamp']
 
+class Device(models.Model):
+    DEVICE_TYPE_CHOICES = [
+        ('ios', 'iOS'),
+        ('android', 'Android'),
+    ]
+    
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name='devices')
+    push_token = models.CharField(max_length=255, unique=True)
+    device_type = models.CharField(max_length=10, choices=DEVICE_TYPE_CHOICES)
+    device_name = models.CharField(max_length=255, blank=True)
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['user', 'push_token']
+
+    def __str__(self):
+        return f"{self.user.email} - {self.device_type}"
+
 class MachineType(models.Model):
     name = models.CharField(max_length=255)
     type = models.CharField(max_length=255)

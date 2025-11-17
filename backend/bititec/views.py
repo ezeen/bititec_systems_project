@@ -15,8 +15,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
 from .permissions import StorePermissionMixin
 from .middleware import SecurityUtils
-from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, LeaseAccInquiry, LeaseContract, LeaseMachineSwap, LeasePartInquiry, LeasePayment, LeaseServiceSchedule, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, KeyAudit, Payment, PurchaseOrder, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem, LeasePartInquiryPayment, LeaseAccInquiryPayment
-from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeaseMachineSwapSerializer, LeasePartInquirySerializer, LeasePaymentSerializer, LeaseServiceScheduleSerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, PaymentSerializer, PurchaseOrderSerializer, QuotationSerializer, SaleSerializer, StorePartInquirySerializer, StoreAccessoryInquirySerializer, TransferSerializer, UserSerializer, RegisterSerializer, StoreSerializer, LeasePartInquiryPaymentSerializer, LeaseAccInquiryPaymentSerializer
+from .models import Accessory, AccessoryType, ChatGroup, ChatMessage, Client, ClientMachine, CustomUser, Delivery, Device, LeaseAccInquiry, LeaseContract, LeaseMachineSwap, LeasePartInquiry, LeasePayment, LeaseServiceSchedule, LoginAttempt, MachineType, Machine, MeterReading, PartType, Part, KeyAudit, Payment, PurchaseOrder, Quotation, Sale, SaleItem, SecurityEvent, Store, Call, ServiceCallToken, StorePartInquiry, StoreAccessoryInquiry, Transfer, TransferItem, LeasePartInquiryPayment, LeaseAccInquiryPayment
+from .serializers import AccessorySerializer, AccessoryTypeSerializer, CallSerializer, ChatGroupSerializer, ChatMessageSerializer, ClientMachineSerializer, ClientSerializer, CustomTokenObtainPairSerializer, DeliverySerializer, DeviceSerializer, LeaseAccInquirySerializer, LeaseContractSerializer, LeaseMachineSwapSerializer, LeasePartInquirySerializer, LeasePaymentSerializer, LeaseServiceScheduleSerializer, MachineSerializer, MachineTypeSerializer, MeterReadingSerializer, PartSerializer, PartTypeSerializer, PaymentSerializer, PurchaseOrderSerializer, QuotationSerializer, SaleSerializer, StorePartInquirySerializer, StoreAccessoryInquirySerializer, TransferSerializer, UserSerializer, RegisterSerializer, StoreSerializer, LeasePartInquiryPaymentSerializer, LeaseAccInquiryPaymentSerializer
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.views import APIView
@@ -799,42 +799,43 @@ class StandardPagination(PageNumberPagination):
     page_size_query_param = 'page_size'
     max_page_size = 100
 
+class DeviceViewSet(viewsets.ModelViewSet):
+    serializer_class = DeviceSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        return Device.objects.filter(user=self.request.user)
+    
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
 class MachineViewSet(StorePermissionMixin, viewsets.ModelViewSet):
     serializer_class = MachineSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardPagination
 
-    def retrieve(self, request, *args, **kwargs):
-        instance = self.get_object()
-        serializer = self.get_serializer(instance)
-        
-        # If expanding parts, include their store data
-        expand = request.query_params.get('expand', '')
-        if 'donated_parts' in expand or 'installed_parts' in expand:
-            data = serializer.data
-            if 'donated_parts' in expand:
-                data['donated_parts'] = PartSerializer(
-                    instance.donated_parts.all(),
-                    many=True,
-                    context={'request': request}
-                ).data
-            if 'installed_parts' in expand:
-                data['installed_parts'] = PartSerializer(
-                    instance.installed_parts.all(),
-                    many=True,
-                    context={'request': request}
-                ).data
-            return Response(data)
-    
-        return Response(serializer.data)
-    
     def get_queryset(self):
+        queryset = Machine.objects.all()
+        
+        # CRITICAL FIX: Check for serial_no query parameter (for QR scanning)
+        serial_no = self.request.query_params.get('serial_no')
+        if serial_no:
+            serial_no_clean = serial_no.strip()
+            
+            # Try exact match first (case-insensitive)
+            queryset = queryset.filter(serial_no__iexact=serial_no_clean)
+            
+            # Always return the filtered queryset (empty or with results)
+            return queryset.order_by('-created_at')
+        
+        # Regular filters (only apply if no serial_no search)
         store_id = self.request.query_params.get('store')
         status = self.request.query_params.get('machine_status')
         start_date = self.request.query_params.get('start_date')
         end_date = self.request.query_params.get('end_date')
-        
-        queryset = Machine.objects.all()
         
         if store_id:
             queryset = queryset.filter(store=store_id)
@@ -843,61 +844,72 @@ class MachineViewSet(StorePermissionMixin, viewsets.ModelViewSet):
             
         if start_date and end_date:
             try:
-                # Parse dates and ensure they are in datetime format
                 start = parse_date(start_date)
                 end = parse_date(end_date)
                 
                 if start and end:
                     if start > end:
                         raise ValidationError("End date must be after start date")
-                    
-                    # Create a query that explicitly filters by created_at date
                     queryset = queryset.filter(created_at__date__gte=start, created_at__date__lte=end)
-                    
-                    # Debug logging - check the exact SQL query 
-                    sql_query = str(queryset.query)
-
-                    sample_data = list(queryset[:5].values('id', 'created_at'))
             except (ValueError, TypeError) as e:
                 error_msg = f"Invalid date format. Use YYYY-MM-DD: {str(e)}"
                 raise ValidationError(error_msg) from e
 
         return queryset.order_by('-created_at')
     
-    def update(self, request, *args, **kwargs):
-        # Handle partial updates properly
-        instance = self.get_object()
-        serializer = self.get_serializer(
-            instance, 
-            data=request.data, 
-            partial=True  # Ensure partial updates are allowed
-        )
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
-        return Response(serializer.data)
-    
+    def list(self, request, *args, **kwargs):
+        # If serial_no is provided, disable pagination for QR scan
+        serial_no = request.query_params.get('serial_no')
+        if serial_no:
+            queryset = self.get_queryset()
+            serializer = self.get_serializer(queryset, many=True)
+            logger.info(f"✅ Returning machine data for QR scan (count: {queryset.count()})")
+            # Return consistent format with results array
+            return Response({
+                'count': queryset.count(),
+                'next': None,
+                'previous': None,
+                'results': serializer.data
+            })
+        
+        return super().list(request, *args, **kwargs)
+
+
 class PartViewSet(StorePermissionMixin, viewsets.ModelViewSet):
     serializer_class = PartSerializer  
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardPagination
 
     def get_queryset(self):
-        part_status = self.request.query_params.get('part_status')
-        start_date = self.request.query_params.get('start_date')
-        end_date = self.request.query_params.get('end_date')
-
+        # FIXED: Use correct related_name 'sale_items' instead of 'saleitem_set'
         queryset = Part.objects.prefetch_related(
             Prefetch('leasepartinquiry_set', 
                 queryset=LeasePartInquiry.objects.select_related(
                     'lease__client', 'part'
-                ).filter(lease__is_active=True)  # Only show active leases
+                ).filter(lease__is_active=True)
             ),
-            Prefetch('saleitem_set', 
+            Prefetch('sale_items',  # FIXED: Changed from 'saleitem_set'
                 queryset=SaleItem.objects.select_related('sale__client')
             )
         )
         
+        # CRITICAL FIX: Check for ref_no query parameter (for QR scanning)
+        ref_no = self.request.query_params.get('ref_no')
+        if ref_no:
+            ref_no_clean = ref_no.strip()
+            
+            # Try exact match first (case-insensitive)
+            queryset = queryset.filter(ref_no__iexact=ref_no_clean)
+            
+            # Always return the filtered queryset (empty or with results)
+            return queryset.order_by('-created_at')
+        
+        # Regular filters
         store_id = self.request.query_params.get('store')
+        part_status = self.request.query_params.get('part_status')
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        
         if store_id:
             queryset = queryset.filter(store=store_id)
         if part_status:  
@@ -905,44 +917,69 @@ class PartViewSet(StorePermissionMixin, viewsets.ModelViewSet):
             
         if start_date and end_date:
             try:
-                # Parse dates and ensure they are in datetime format
                 start = parse_date(start_date)
                 end = parse_date(end_date)
                 
                 if start and end:
                     if start > end:
                         raise ValidationError("End date must be after start date")
-                    
-                    # Using __date correctly for comparing date fields
                     queryset = queryset.filter(created_at__date__gte=start, created_at__date__lte=end)
-                    
             except (ValueError, TypeError) as e:
                 raise ValidationError(f"Invalid date format. Use YYYY-MM-DD: {str(e)}") from e
 
         return queryset.order_by('-created_at')
     
+    def list(self, request, *args, **kwargs):
+        # If ref_no is provided, disable pagination for QR scan
+        ref_no = request.query_params.get('ref_no')
+        if ref_no:
+            queryset = self.get_queryset()
+            serializer = self.get_serializer(queryset, many=True)
+            # Return consistent format with results array
+            return Response({
+                'count': queryset.count(),
+                'next': None,
+                'previous': None,
+                'results': serializer.data
+            })
+        
+        return super().list(request, *args, **kwargs)
+
+
 class AccessoryViewSet(StorePermissionMixin, viewsets.ModelViewSet):
     serializer_class = AccessorySerializer  
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardPagination
     
     def get_queryset(self):
-        start_date = self.request.query_params.get('start_date')
-        end_date = self.request.query_params.get('end_date')
-        acc_status = self.request.query_params.get('acc_status')
-        
         queryset = Accessory.objects.prefetch_related(
             Prefetch('leaseaccinquiry_set', 
                 queryset=LeaseAccInquiry.objects.select_related(
                     'lease__client', 'accessory'
                 ).filter(lease__is_active=True)  
             ),
-            Prefetch('saleitem_set', 
+            Prefetch('sale_accessories', 
                 queryset=SaleItem.objects.select_related('sale__client')
             )
         )
         
+        # CRITICAL FIX: Check for ref_no query parameter (for QR scanning)
+        ref_no = self.request.query_params.get('ref_no')
+        if ref_no:
+            ref_no_clean = ref_no.strip()
+            
+            # Try exact match first (case-insensitive)
+            queryset = queryset.filter(ref_no__iexact=ref_no_clean)
+            
+            # Always return the filtered queryset (empty or with results)
+            return queryset.order_by('-created_at')
+        
+        # Regular filters
         store_id = self.request.query_params.get('store')
+        acc_status = self.request.query_params.get('acc_status')
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        
         if store_id:
             queryset = queryset.filter(store=store_id)
         if acc_status:  
@@ -950,40 +987,81 @@ class AccessoryViewSet(StorePermissionMixin, viewsets.ModelViewSet):
             
         if start_date and end_date:
             try:
-                # Parse dates and ensure they are in datetime format
                 start = parse_date(start_date)
                 end = parse_date(end_date)
                 
                 if start and end:
                     if start > end:
                         raise ValidationError("End date must be after start date")
-                    
-                    # Using __date correctly for comparing date fields
                     queryset = queryset.filter(created_at__date__gte=start, created_at__date__lte=end)
-                    
             except (ValueError, TypeError) as e:
                 raise ValidationError(f"Invalid date format. Use YYYY-MM-DD: {str(e)}") from e
 
         return queryset.order_by('-created_at')
     
+    def list(self, request, *args, **kwargs):
+        # If ref_no is provided, disable pagination for QR scan
+        ref_no = request.query_params.get('ref_no')
+        if ref_no:
+            queryset = self.get_queryset()
+            serializer = self.get_serializer(queryset, many=True)
+            # Return consistent format with results array
+            return Response({
+                'count': queryset.count(),
+                'next': None,
+                'previous': None,
+                'results': serializer.data
+            })
+        
+        return super().list(request, *args, **kwargs)
+    
 class MachineListCreate(generics.ListCreateAPIView):
     queryset = Machine.objects.all().select_related('store')
     serializer_class = MachineSerializer
     permission_classes = [permissions.IsAuthenticated]
+    # REMOVED pagination_class to keep original behavior
     search_fields = ['machine_name', 'machine_brand', 'serial_no', 'store__store_name']
     ordering_fields = ['machine_name', 'created_at', 'unit_value']
 
     def get_queryset(self):
+        queryset = Machine.objects.all().select_related('store')
+        
+        # CRITICAL FIX: Check for serial_no query parameter (for QR scanning)
+        serial_no = self.request.query_params.get('serial_no')
+        if serial_no:
+            serial_no_clean = serial_no.strip()
+            
+            # Try exact match first (case-insensitive)
+            queryset = queryset.filter(serial_no__iexact=serial_no_clean)
+            
+            return queryset.order_by('-created_at')
+        
+        # Regular filters
         store_id = self.request.query_params.get('store')
-        machine_status = self.request.query_params.get('machine_status')  # Add this line
-        queryset = Machine.objects.all()
+        machine_status = self.request.query_params.get('machine_status')
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
         
         if store_id:
             queryset = queryset.filter(store=store_id)
-        if machine_status:  # Add status filtering
+        if machine_status:
             queryset = queryset.filter(machine_status=machine_status)
             
-        return queryset
+        if start_date and end_date:
+            try:
+                start = parse_date(start_date)
+                end = parse_date(end_date)
+                
+                if start and end:
+                    if start > end:
+                        raise ValidationError("End date must be after start date")
+                    queryset = queryset.filter(created_at__date__gte=start, created_at__date__lte=end)
+            except (ValueError, TypeError) as e:
+                error_msg = f"Invalid date format. Use YYYY-MM-DD: {str(e)}"
+                raise ValidationError(error_msg) from e
+
+        return queryset.order_by('-created_at')
+
 
 class MachineRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
     queryset = Machine.objects.all().select_related('store')
@@ -995,14 +1073,58 @@ class PartListCreate(generics.ListCreateAPIView):
     queryset = Part.objects.all().select_related('store')
     serializer_class = PartSerializer
     permission_classes = [permissions.IsAuthenticated]
-    search_fields = ['part_name', 'part_brand', 'serial_no', 'store__store_name']
+    # REMOVED pagination_class to keep original behavior
+    search_fields = ['part_name', 'part_brand', 'ref_no', 'store__store_name']
     ordering_fields = ['part_name', 'created_at', 'unit_value']
 
     def get_queryset(self):
+        # FIXED: Use correct related_name 'sale_items' instead of 'saleitem_set'
+        queryset = Part.objects.all().select_related('store').prefetch_related(
+            Prefetch('leasepartinquiry_set', 
+                queryset=LeasePartInquiry.objects.select_related(
+                    'lease__client', 'part'
+                ).filter(lease__is_active=True)
+            ),
+            Prefetch('sale_items',  # FIXED: Changed from 'saleitem_set'
+                queryset=SaleItem.objects.select_related('sale__client')
+            )
+        )
+        
+        # CRITICAL FIX: Check for ref_no query parameter (for QR scanning)
+        ref_no = self.request.query_params.get('ref_no')
+        if ref_no:
+            ref_no_clean = ref_no.strip()
+            
+            # Try exact match first (case-insensitive)
+            queryset = queryset.filter(ref_no__iexact=ref_no_clean)
+            
+            return queryset.order_by('-created_at')
+        
+        # Regular filters
         store_id = self.request.query_params.get('store')
+        part_status = self.request.query_params.get('part_status')
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        
         if store_id:
-            return Part.objects.filter(store=store_id)
-        return Part.objects.all()
+            queryset = queryset.filter(store=store_id)
+        if part_status:
+            queryset = queryset.filter(part_status=part_status)
+            
+        if start_date and end_date:
+            try:
+                start = parse_date(start_date)
+                end = parse_date(end_date)
+                
+                if start and end:
+                    if start > end:
+                        raise ValidationError("End date must be after start date")
+                    queryset = queryset.filter(created_at__date__gte=start, created_at__date__lte=end)
+            except (ValueError, TypeError) as e:
+                raise ValidationError(f"Invalid date format. Use YYYY-MM-DD: {str(e)}") from e
+
+        return queryset.order_by('-created_at')
+
 
 class PartRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
     queryset = Part.objects.all().select_related('store')
@@ -1014,14 +1136,58 @@ class AccessoryListCreate(generics.ListCreateAPIView):
     queryset = Accessory.objects.all().select_related('store')
     serializer_class = AccessorySerializer
     permission_classes = [permissions.IsAuthenticated]
-    search_fields = ['acc_name', 'acc_brand', 'serial_no', 'store__store_name']
+    # REMOVED pagination_class to keep original behavior
+    search_fields = ['acc_name', 'acc_brand', 'ref_no', 'store__store_name']
     ordering_fields = ['acc_name', 'created_at', 'unit_value']
 
     def get_queryset(self):
+        # FIXED: Use correct related_name 'sale_accessories' instead of 'saleitem_set'
+        queryset = Accessory.objects.all().select_related('store').prefetch_related(
+            Prefetch('leaseaccinquiry_set', 
+                queryset=LeaseAccInquiry.objects.select_related(
+                    'lease__client', 'accessory'
+                ).filter(lease__is_active=True)  
+            ),
+            Prefetch('sale_accessories',  # FIXED: Changed from 'saleitem_set'
+                queryset=SaleItem.objects.select_related('sale__client')
+            )
+        )
+        
+        # CRITICAL FIX: Check for ref_no query parameter (for QR scanning)
+        ref_no = self.request.query_params.get('ref_no')
+        if ref_no:
+            ref_no_clean = ref_no.strip()
+            
+            # Try exact match first (case-insensitive)
+            queryset = queryset.filter(ref_no__iexact=ref_no_clean)
+            
+            return queryset.order_by('-created_at')
+        
+        # Regular filters
         store_id = self.request.query_params.get('store')
+        acc_status = self.request.query_params.get('acc_status')
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        
         if store_id:
-            return Accessory.objects.filter(store=store_id)
-        return Accessory.objects.all()
+            queryset = queryset.filter(store=store_id)
+        if acc_status:
+            queryset = queryset.filter(acc_status=acc_status)
+            
+        if start_date and end_date:
+            try:
+                start = parse_date(start_date)
+                end = parse_date(end_date)
+                
+                if start and end:
+                    if start > end:
+                        raise ValidationError("End date must be after start date")
+                    queryset = queryset.filter(created_at__date__gte=start, created_at__date__lte=end)
+            except (ValueError, TypeError) as e:
+                raise ValidationError(f"Invalid date format. Use YYYY-MM-DD: {str(e)}") from e
+
+        return queryset.order_by('-created_at')
+
 
 class AccessoryRetrieveUpdateDestroy(generics.RetrieveUpdateDestroyAPIView):
     queryset = Accessory.objects.all().select_related('store')
